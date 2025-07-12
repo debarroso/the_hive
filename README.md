@@ -1,4 +1,4 @@
-# K3s Raspberry Pi Cluster Setup with Ansible
+# Initial K3s Raspberry Pi Cluster Setup with Ansible
 
 This repository contains Ansible playbooks to automate the setup of a K3s Kubernetes cluster on a group of Raspberry Pi nodes.
 
@@ -25,14 +25,14 @@ This repository contains Ansible playbooks to automate the setup of a K3s Kubern
 
 ## Installation Steps
 
-Follow these steps in order to provision your K3s cluster.
+Follow these steps in order within the `the_hive` directory to provision your K3s cluster.
 
 ### 1. Update and Reboot Nodes
 
-First, ensure all your Raspberry Pi nodes are up-to-date. This playbook will update the `apt` package cache, upgrade all packages, and reboot the nodes.
+First, ensure all your Raspberry Pi nodes are up-to-date. This playbook will update the `apt` package cache, upgrade all packages, and reboot the nodes. Run this script to update the OS on all cluster nodes going forward.
 
 ```bash
-ansible-playbook update_playbook.yml
+ansible-playbook -i hosts playbooks/update_playbook.yml
 ```
 
 ### 2. Enable Cgroups
@@ -40,7 +40,7 @@ ansible-playbook update_playbook.yml
 For Kubernetes to function correctly, you need to enable control groups (cgroups) on all nodes. This playbook modifies the boot configuration and reboots the nodes to apply the changes.
 
 ```bash
-ansible-playbook enable_cgroups_playbook.yml
+ansible-playbook -i hosts playbooks/enable_cgroups_playbook.yml
 ```
 
 ### 3. (Optional) Mount External Storage
@@ -48,7 +48,7 @@ ansible-playbook enable_cgroups_playbook.yml
 If you plan to use external storage with your cluster, this playbook will partition, format, and mount a USB drive on all nodes.
 
 ```bash
-ansible-playbook mount_external_storage_playbook.yml
+ansible-playbook -i hosts playbooks/mount_external_storage_playbook.yml
 ```
 
 ### 4. Install K3s
@@ -59,7 +59,7 @@ This is the final step to install the K3s cluster. The playbook will:
 3.  Install the K3s agent on the remaining worker nodes, connecting them to the master.
 
 ```bash
-ansible-playbook k3s_playbook.yml
+ansible-playbook -i hosts playbooks/k3s_playbook.yml
 ```
 
 After the playbook finishes, your K3s cluster will be up and running. You can SSH into the master node and use `kubectl` to manage your cluster.

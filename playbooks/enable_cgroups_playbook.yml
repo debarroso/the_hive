@@ -1,0 +1,28 @@
+---
+- name: Enable Cgroups and Remove Duplicates
+  hosts: the_hive
+  become: true
+
+  tasks:
+    - name: Remove duplicate cgroup_memory parameter
+      ansible.builtin.replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: ' cgroup_memory=1'
+        replace: ''
+
+    - name: Remove duplicate cgroup_enable parameter
+      ansible.builtin.replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: ' cgroup_enable=memory'
+        replace: ''
+
+    - name: Ensure cgroup parameters are present
+      ansible.builtin.lineinfile:
+        path: /boot/firmware/cmdline.txt
+        regexp: '^(.*)$'
+        line: '\1 cgroup_memory=1 cgroup_enable=memory'
+        backrefs: yes
+
+    - name: Reboot the nodes to apply boot changes
+      ansible.builtin.reboot:
+        msg: "Rebooting nodes to enable cgroups"
