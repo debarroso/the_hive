@@ -1,0 +1,10 @@
+[the_hive]
+bee1
+bee2
+bee3
+bee4
+bee5
+
+[all:vars]
+ansible_user=oliver
+ansible_python_interpreter=/usr/bin/python3

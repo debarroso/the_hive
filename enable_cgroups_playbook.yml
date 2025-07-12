@@ -1,0 +1,16 @@
+---
+- name: Enable Cgroups for Kubernetes
+  hosts: the_hive
+  become: true
+
+  tasks:
+    - name: Add cgroup settings to /boot/firmware/cmdline.txt
+      ansible.builtin.lineinfile:
+        path: /boot/firmware/cmdline.txt
+        regexp: '^(.*)$'
+        line: '\1 cgroup_memory=1 cgroup_enable=memory'
+        backrefs: yes
+
+    - name: Reboot the nodes to apply boot changes
+      ansible.builtin.reboot:
+        msg: "Rebooting nodes to enable cgroups"

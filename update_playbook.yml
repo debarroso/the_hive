@@ -1,0 +1,22 @@
+---
+- name: Update, Upgrade, and Reboot Raspberry Pi Nodes
+  hosts: the_hive
+  become: true
+
+  tasks:
+    - name: Wait for apt lock to be released
+      ansible.builtin.shell: 'while sudo fuser /var/lib/dpkg/lock-frontend ; do sleep 5 ; done'
+      changed_when: false
+
+    - name: Update apt package cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Upgrade all apt packages to the latest versions
+      ansible.builtin.apt:
+        upgrade: dist
+
+    - name: Reboot the nodes if updates were installed
+      ansible.builtin.reboot:
+        msg: "Rebooting nodes after updates"

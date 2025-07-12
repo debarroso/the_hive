@@ -1,0 +1,42 @@
+---
+- name: Get IP address for all nodes
+  hosts: the_hive
+  tasks:
+    - name: Get the IP address of the node
+      ansible.builtin.setup:
+        filter: ansible_default_ipv4.address
+
+- name: Install K3s on the Master Node
+  hosts: the_hive[0]
+  become: true
+  tasks:
+    - name: Install K3s server
+      ansible.builtin.shell: >
+        curl -sfL https://get.k3s.io | sh -s - server
+      args:
+        creates: /etc/systemd/system/k3s.service
+
+- name: Get the Join Token from the Master
+  hosts: the_hive[0]
+  become: true
+  tasks:
+    - name: Wait for node-token to be created
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        timeout: 60
+
+    - name: Fetch the token file from the master
+      ansible.builtin.fetch:
+        src: /var/lib/rancher/k3s/server/node-token
+        dest: /tmp/k3s_token
+        flat: yes
+
+- name: Install K3s on Worker Nodes
+  hosts: the_hive[1:]
+  become: true
+  tasks:
+    - name: Install K3s agent on worker nodes
+      ansible.builtin.shell: >
+        curl -sfL https://get.k3s.io | K3S_URL="https://{{ hostvars[groups['the_hive'][0]]['ansible_default_ipv4']['address'] }}:6443" K3S_TOKEN="{{ lookup('file', '/tmp/k3s_token') }}" sh -
+      args:
+        creates: /etc/systemd/system/k3s-agent.service
