@@ -11,7 +11,7 @@ This repository contains Ansible playbooks to automate the setup of a K3s Kubern
 ## Inventory Setup
 
 1.  Open the `hosts` file.
-2.  Under the `[the_hive]` group, list the hostnames or IP addresses of your Raspberry Pi nodes. You can assign host names in the /etc/hosts file.
+2.  Under the `[the_hive]` group, list the hostnames or IP addresses of your Raspberry Pi nodes. You can assign host names in the `/etc/hosts` file.
 
     ```ini
     [the_hive]
