@@ -62,4 +62,13 @@ This is the final step to install the K3s cluster. The playbook will:
 ansible-playbook -i hosts playbooks/k3s_playbook.yml
 ```
 
+### 5. (Optional) Install Longhorn for Persistent Storage
+
+To use Longhorn for persistent storage across the cluster, you can run the `install_longhorn_playbook`. This playbook prepares the nodes by installing necessary dependencies.
+
+
+```bash
+ansible-playbook -i hosts playbooks/install_longhorn_playbook.yml
+```
+
 After the playbook finishes, your K3s cluster will be up and running. You can SSH into the master node and use `kubectl` to manage your cluster.

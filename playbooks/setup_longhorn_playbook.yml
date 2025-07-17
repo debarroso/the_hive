@@ -1,0 +1,50 @@
+---
+- name: Correct Mounts and Prepare Nodes for Longhorn
+  hosts: the_hive
+  become: true
+
+  tasks:
+    - name: Find which device is mounted at /mnt/storage
+      ansible.builtin.set_fact:
+        storage_device_info: "{{ ansible_facts.mounts | selectattr('mount', 'equalto', '/mnt/storage') | first }}"
+      # This task only runs if the playbook hasn't been successfully run before
+      when: "'/mnt/longhorn' not in ansible_facts.mounts | map(attribute='mount')"
+
+    - name: Fail if /mnt/storage is not mounted
+      ansible.builtin.fail:
+        msg: "Could not find a device mounted at /mnt/storage. Please run your initial playbook first."
+      when: storage_device_info is not defined
+
+    - name: Get the UUID of the partition
+      ansible.builtin.command: "blkid -s UUID -o value {{ storage_device_info.device }}"
+      register: blkid_result
+      changed_when: false
+
+    - name: Store the partition UUID as a fact
+      ansible.builtin.set_fact:
+        partition_uuid: "{{ blkid_result.stdout }}"
+
+    - name: Unmount the old /mnt/storage and remove its fstab entry
+      ansible.builtin.mount:
+        path: /mnt/storage
+        state: absent
+
+    - name: Create the mount point directory for Longhorn
+      ansible.builtin.file:
+        path: /mnt/longhorn
+        state: directory
+        mode: '0755'
+
+    - name: Mount the drive by UUID at /mnt/longhorn and add to fstab
+      ansible.builtin.mount:
+        path: /mnt/longhorn
+        src: "UUID={{ partition_uuid }}"
+        fstype: ext4
+        opts: defaults,nofail
+        state: mounted
+
+    - name: Install open-iscsi package for Longhorn
+      ansible.builtin.apt:
+        name: open-iscsi
+        state: present
+        update_cache: yes
