@@ -71,4 +71,31 @@ To use Longhorn for persistent storage across the cluster, you can run the `inst
 ansible-playbook -i hosts playbooks/install_longhorn_playbook.yml
 ```
 
-After the playbook finishes, your K3s cluster will be up and running. You can SSH into the master node and use `kubectl` to manage your cluster.
+
+## Post-Installation
+
+### Verify the Cluster
+
+After the installation, you can verify that all nodes have joined the cluster. SSH into the master node (the first host in your inventory) and run the following command:
+
+```bash
+kubectl get nodes
+```
+
+You should see a list of all your nodes with a `Ready` status.
+
+### Accessing the Cluster Remotely
+
+To manage your cluster from your local machine (the Ansible controller), you need the `kubeconfig` file.
+
+1.  Copy the `kubeconfig` file from the master node to your local machine. Replace `bee1` with the hostname or IP of your master node, and `<ansible_user>` with your username on the Raspberry Pi nodes.
+
+    ```bash
+    scp <ansible_user>@bee1:/etc/rancher/k3s/k3s.yaml ~/.kube/config
+    ```
+
+2.  The `k3s.yaml` file contains credentials for the `default` user and points to the local IP of the master node (`127.0.0.1`). You need to replace this with the actual IP address of your master node so you can access it from your local machine.
+
+    Open the `~/.kube/config` file on your local machine and change `server: https://127.0.0.1:6443` to `server: https://<master_node_ip>:6443`.
+
+3.  Now you can manage your cluster from your local machine using `kubectl`
