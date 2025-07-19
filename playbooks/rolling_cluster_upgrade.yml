@@ -1,0 +1,41 @@
+# playbook-k8s-safe-rolling-upgrade.yml
+---
+- name: Perform a SAFE rolling update on Kubernetes nodes
+  hosts: the_hive
+  become: true
+  serial: 1          # Forces a one-by-one update.
+
+  tasks:
+    - name: Cordon the node to prevent new pods from being scheduled
+      become: false
+      ansible.builtin.command: "kubectl cordon {{ inventory_hostname }}"
+      delegate_to: localhost # Assumes kubectl is configured on the machine running Ansible
+
+    - name: Drain the node of all running pods
+      become: false
+      ansible.builtin.command: "kubectl drain {{ inventory_hostname }} --ignore-daemonsets --delete-emptydir-data"
+      delegate_to: localhost
+
+    - name: Update apt cache and upgrade packages
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
+
+    - name: Reboot the node
+      ansible.builtin.reboot:
+        msg: "Rebooting node {{ inventory_hostname }} after updates"
+
+    - name: Wait for the node to report as 'Ready' in Kubernetes
+      become: false
+      ansible.builtin.shell: "kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'"
+      delegate_to: localhost
+      register: node_status
+      until: node_status.stdout == 'True'
+      retries: 30  # Try 30 times
+      delay: 10    # Wait 10 seconds between each try (5 minutes total)
+      changed_when: false # This command doesn't change state, so we report no change
+
+    - name: Uncordon the node to bring it back into service
+      become: false
+      ansible.builtin.command: "kubectl uncordon {{ inventory_hostname }}"
+      delegate_to: localhost

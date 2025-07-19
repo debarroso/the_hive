@@ -28,6 +28,12 @@
         repo_url: "https://grafana.github.io/helm-charts"
         state: present
 
+    - name: Add the Prometheus Community Helm repository
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: "https://prometheus-community.github.io/helm-charts"
+        state: present
+
     - name: Update all Helm repositories to fetch the latest charts
       ansible.builtin.command: "helm repo update"
       changed_when: false # This command never reports a change
@@ -79,6 +85,31 @@
             selfHostedServerApiConfig:
               apiUrl: "http://prefect-server.prefect.svc.cluster.local:4200/api"
 
+    # ------------- Prometheus Deployment (Monitoring Backend)
+    - name: Deploy or Upgrade the Prometheus Stack chart
+      kubernetes.core.helm:
+        name: prometheus
+        chart_ref: prometheus-community/kube-prometheus-stack
+        release_namespace: monitoring # Deploys into the same namespace as Grafana
+        state: present
+        create_namespace: true
+        values:
+          # Disable Grafana because you are already deploying it separately.
+          grafana:
+            enabled: false
+
+          # This ensures metrics data survives pod restarts using Longhorn.
+          prometheus:
+            prometheusSpec:
+              storageSpec:
+                volumeClaimTemplate:
+                  spec:
+                    storageClassName: "longhorn"
+                    accessModes: ["ReadWriteOnce"]
+                    resources:
+                      requests:
+                        storage: 20Gi
+
     # ------------- Grafana Deployment (Monitoring Layer) -------------
     - name: Deploy or Upgrade the Grafana chart
       kubernetes.core.helm:
@@ -96,6 +127,15 @@
             accessModes:
               - ReadWriteOnce
             size: 5Gi
-          # You can get the initial password with:
-          # kubectl get secret --namespace monitoring grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
           adminPassword: "admin"
+          datasources:
+            datasources.yaml:
+              apiVersion: 1
+              datasources:
+                - name: Prometheus
+                  type: prometheus
+                  # This is the internal Kubernetes address for the Prometheus service
+                  # created by the helm chart we just added.
+                  url: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+                  access: proxy
+                  isDefault: true
