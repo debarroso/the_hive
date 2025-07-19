@@ -127,7 +127,11 @@
             accessModes:
               - ReadWriteOnce
             size: 5Gi
-          adminPassword: "admin"
+          admin:
+            existingSecret: "grafana-admin-creds"
+            userKey: "admin_user"
+            passwordKey: "admin_password"
+
           datasources:
             datasources.yaml:
               apiVersion: 1
@@ -135,7 +139,7 @@
                 - name: Prometheus
                   type: prometheus
                   # This is the internal Kubernetes address for the Prometheus service
-                  # created by the helm chart we just added.
+                  # created by the helm chart
                   url: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
                   access: proxy
                   isDefault: true
