@@ -1,17 +1,18 @@
-# Initial K3s Raspberry Pi Cluster Setup with Ansible
+# K3s Raspberry Pi Cluster Setup with Ansible
 
-This repository contains Ansible playbooks to automate the setup of a K3s Kubernetes cluster on a group of Raspberry Pi nodes.
+This repository contains Ansible playbooks to fully automate the setup of a K3s Kubernetes cluster on a group of Raspberry Pi nodes, from OS configuration to application deployment.
 
 ## Prerequisites
 
-*   **Ansible Controller**: You need a machine with Ansible installed to run these playbooks.
-*   **Raspberry Pi Nodes**: A set of Raspberry Pis with a fresh install of a compatible OS (e.g., Raspberry Pi OS).
-*   **SSH Access**: Ensure you have passwordless SSH access from your Ansible controller to all Raspberry Pi nodes.
+* **Ansible Controller**: A machine with Ansible installed to run these playbooks (e.g., your Mac Mini).
+* **Raspberry Pi Nodes**: A set of Raspberry Pis with a fresh install of a compatible OS (e.g., Raspberry Pi OS).
+* **SSH Access**: Passwordless SSH access from your Ansible controller to all Raspberry Pi nodes.
+* **Python `kubernetes-client`**: The Helm and Kubernetes Ansible modules require this. Install it with `pip install kubernetes-client`.
 
 ## Inventory Setup
 
 1.  Open the `hosts` file.
-2.  Under the `[the_hive]` group, list the hostnames or IP addresses of your Raspberry Pi nodes. You can assign host names in the `/etc/hosts` file.
+2.  Under the `[the_hive]` group, list the hostnames or IP addresses of your Raspberry Pi nodes. You can assign host names in the `/etc/hosts` file. The first node in the list will become the control plane (master).
 
     ```ini
     [the_hive]
@@ -23,54 +24,48 @@ This repository contains Ansible playbooks to automate the setup of a K3s Kubern
     ```
 3.  Update the `ansible_user` variable in `[all:vars]` to match the username on your Raspberry Pi nodes.
 
-## Installation Steps
+## Installation and Setup
 
-Follow these steps in order within the `the_hive` directory to provision your K3s cluster.
+Follow these steps in order to provision your K3s cluster. Run all commands from your Ansible controller machine.
 
-### 1. Update and Reboot Nodes
-
-First, ensure all your Raspberry Pi nodes are up-to-date. This playbook will update the `apt` package cache, upgrade all packages, and reboot the nodes. Run this script to update the OS on all cluster nodes going forward.
-
+### 1. Initial Node Preparation**
+Ensures all nodes are up-to-date and have cgroups enabled. These playbooks will reboot the nodes.
 ```bash
-ansible-playbook -i hosts playbooks/update_playbook.yml
-```
-
-### 2. Enable Cgroups
-
-For Kubernetes to function correctly, you need to enable control groups (cgroups) on all nodes. This playbook modifies the boot configuration and reboots the nodes to apply the changes.
-
-```bash
+ansible-playbook -i hosts playbooks/initial_update_cluster_playbook.yml
 ansible-playbook -i hosts playbooks/enable_cgroups_playbook.yml
 ```
 
-### 3. (Optional) Mount External Storage
+### 2. Configure Storage
 
-If you plan to use external storage with your cluster, this playbook will partition, format, and mount a USB drive on all nodes.
+Prepares and mounts a dedicated storage drive on each node using its resilient UUID. This step is required for the application stack.
 
 ```bash
 ansible-playbook -i hosts playbooks/mount_external_storage_playbook.yml
 ```
 
-### 4. Install K3s
+### 3. Install K3s
 
-This is the final step to install the K3s cluster. The playbook will:
-1.  Install the K3s server on the first node in your inventory (`the_hive[0]`).
-2.  Retrieve the join token from the master node.
-3.  Install the K3s agent on the remaining worker nodes, connecting them to the master.
+Installs the k3s server on the first node and joins the rest as workers.
 
 ```bash
-ansible-playbook -i hosts playbooks/k3s_playbook.yml
+ansible-playbook -i hosts playbooks/install_k3s_playbook.yml
 ```
 
-### 5. (Optional) Install Longhorn for Persistent Storage
+### 4. Fetch kubeconfig for Remote Access
 
-To use Longhorn for persistent storage across the cluster, you can run the `install_longhorn_playbook`. This playbook prepares the nodes by installing necessary dependencies.
+This playbook automatically fetches the cluster configuration file and modifies it for local use.
 
 
 ```bash
-ansible-playbook -i hosts playbooks/install_longhorn_playbook.yml
+ansible-playbook -i hosts playbooks/fetch_kubeconfig_playbook.yml
 ```
 
+After running, move the generated k3s.yaml file to ~/.kube/config on your local machine. You can now manage the cluster with kubectl.
+
+```bash
+mv k3s.yaml ~/.kube/config
+kubectl get nodes
+```
 
 ## Post-Installation
 
@@ -84,18 +79,37 @@ kubectl get nodes
 
 You should see a list of all your nodes with a `Ready` status.
 
-### Accessing the Cluster Remotely
+# Application Stack Deployment
 
-To manage your cluster from your local machine (the Ansible controller), you need the `kubeconfig` file.
+### 1. Prepare Nodes for Longhorn
 
-1.  Copy the `kubeconfig` file from the master node to your local machine. Replace `bee1` with the hostname or IP of your master node, and `<ansible_user>` with your username on the Raspberry Pi nodes.
+Installs `open-iscsi` and other dependencies required by Longhorn.
 
-    ```bash
-    scp <ansible_user>@bee1:/etc/rancher/k3s/k3s.yaml ~/.kube/config
-    ```
+```bash
+ansible-playbook -i hosts playbooks/setup_longhorn_playbook.yml
+```
 
-2.  The `k3s.yaml` file contains credentials for the `default` user and points to the local IP of the master node (`127.0.0.1`). You need to replace this with the actual IP address of your master node so you can access it from your local machine.
+### 2. Deploy Core Application Stack
 
-    Open the `~/.kube/config` file on your local machine and change `server: https://127.0.0.1:6443` to `server: https://<master_node_ip>:6443`.
+Uses Helm to deploy Longhorn, Prefect, Prometheus, and Grafana to the cluster.
 
-3.  Now you can manage your cluster from your local machine using `kubectl`
+```bash
+ansible-playbook -i hosts playbooks/deploy_helm_stack_playbook.yml
+```
+
+### 3. Deploy n8n Workflow Automation
+
+Applies the raw Kubernetes manifest to deploy n8n.
+
+```bash
+kubectl apply -f n8n-deployment.yml
+```
+
+# Cluster Maintenance
+
+## Perform a Safe Rolling Upgrade
+This playbook safely cordons, drains, updates, and reboots one node at a time, ensuring cluster services remain available during OS-level upgrades.
+
+```bash
+ansible-playbook -i hosts playbooks/rolling_cluster_upgrade.yml
+```
