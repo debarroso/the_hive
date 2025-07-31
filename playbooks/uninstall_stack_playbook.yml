@@ -1,0 +1,45 @@
+---
+- name: Uninstall Full Stack
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Uninstall the Grafana chart
+      kubernetes.core.helm:
+        name: grafana
+        release_namespace: monitoring
+        state: absent
+
+    - name: Uninstall the Prometheus Stack chart
+      kubernetes.core.helm:
+        name: prometheus
+        release_namespace: monitoring
+        state: absent
+
+    - name: Uninstall the Prefect Worker chart
+      kubernetes.core.helm:
+        name: prefect-worker
+        release_namespace: prefect
+        state: absent
+
+    - name: Uninstall the Prefect Server chart
+      kubernetes.core.helm:
+        name: prefect-server
+        release_namespace: prefect
+        state: absent
+
+    - name: Forcefully Uninstall the Longhorn chart via command line
+      ansible.builtin.command:
+        cmd: helm uninstall longhorn -n longhorn-system --no-hooks
+      register: helm_uninstall_result
+      changed_when: "'release \"longhorn\" uninstalled' in helm_uninstall_result.stdout"
+      failed_when:
+        - helm_uninstall_result.rc != 0
+        - "'release: not found' not in helm_uninstall_result.stderr"
+
+    - name: Remove the Grafana admin secret
+      kubernetes.core.k8s:
+        state: absent
+        kind: Secret
+        name: grafana-admin-creds
+        namespace: monitoring

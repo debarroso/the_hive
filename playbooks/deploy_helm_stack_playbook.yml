@@ -4,6 +4,7 @@
   gather_facts: false
 
   tasks:
+    # ------------- Dependency Installation -------------
     - name: Ensure Python dependencies for Kubernetes are installed
       ansible.builtin.pip:
         name: kubernetes-client
@@ -36,7 +37,7 @@
 
     - name: Update all Helm repositories to fetch the latest charts
       ansible.builtin.command: "helm repo update"
-      changed_when: false # This command never reports a change
+      changed_when: false
 
     # ------------- Longhorn Deployment (Storage Layer) -------------
     - name: Deploy or Upgrade the Longhorn chart
@@ -56,7 +57,6 @@
         state: present
         create_namespace: true
         values:
-          # Persistence configuration for the server's database
           database:
             type: "postgresql"
             postgresql:
@@ -76,70 +76,40 @@
         create_namespace: true
         values:
           worker:
-            # This is the master switch that tells the worker to use a self-hosted server
             apiConfig: "selfHostedServer"
-            # General configuration for the worker
             config:
               workPool: "default-agent-pool"
-            # API configuration specific to self-hosted mode
             selfHostedServerApiConfig:
               apiUrl: "http://prefect-server.prefect.svc.cluster.local:4200/api"
 
-    # ------------- Prometheus Deployment (Monitoring Backend)
+    # ------------- Prometheus Deployment (Monitoring Backend) -------------
     - name: Deploy or Upgrade the Prometheus Stack chart
       kubernetes.core.helm:
         name: prometheus
         chart_ref: prometheus-community/kube-prometheus-stack
-        release_namespace: monitoring # Deploys into the same namespace as Grafana
+        release_namespace: monitoring
         state: present
         create_namespace: true
         values:
-          # Disable Grafana because you are already deploying it separately.
+          # Enable and configure Grafana within this chart
           grafana:
-            enabled: false
-
-          # This ensures metrics data survives pod restarts using Longhorn.
+            enabled: true
+            # Explicitly tell Grafana to use the secret we created
+            admin:
+              existingSecret: "prometheus-grafana-admin"
+            persistence:
+              enabled: true
+              type: pvc
+              storageClassName: "longhorn"
+              size: 5Gi
+          # Existing Prometheus persistence config remains the same
           prometheus:
             prometheusSpec:
               storageSpec:
                 volumeClaimTemplate:
                   spec:
                     storageClassName: "longhorn"
-                    accessModes: ["ReadWriteOnce"]
+                    accessModes: [ "ReadWriteOnce" ]
                     resources:
                       requests:
                         storage: 20Gi
-
-    # ------------- Grafana Deployment (Monitoring Layer) -------------
-    - name: Deploy or Upgrade the Grafana chart
-      kubernetes.core.helm:
-        name: grafana
-        chart_ref: grafana/grafana
-        release_namespace: monitoring
-        state: present
-        create_namespace: true
-        values:
-          # Enable persistence and use Longhorn
-          persistence:
-            enabled: true
-            type: pvc
-            storageClassName: "longhorn"
-            accessModes:
-              - ReadWriteOnce
-            size: 5Gi
-          admin:
-            existingSecret: "grafana-admin-creds"
-            userKey: "admin_user"
-            passwordKey: "admin_password"
-
-          datasources:
-            datasources.yaml:
-              apiVersion: 1
-              datasources:
-                - name: Prometheus
-                  type: prometheus
-                  # This is the internal Kubernetes address for the Prometheus service
-                  # created by the helm chart
-                  url: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
-                  access: proxy
-                  isDefault: true

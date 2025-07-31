@@ -1,0 +1,16 @@
+---
+- name: Uninstall K3s from Master Node
+  hosts: the_hive[0] # Targets bee1
+  become: yes
+  tasks:
+    - name: Run K3s uninstall script
+      ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
+      ignore_errors: true # Ignore errors if the file doesn't exist
+
+- name: Uninstall K3s from Worker Nodes
+  hosts: the_hive[1:] # Targets bee2, bee3, etc.
+  become: yes
+  tasks:
+    - name: Run K3s agent uninstall script
+      ansible.builtin.command: /usr/local/bin/k3s-agent-uninstall.sh
+      ignore_errors: true # Ignore errors if the file doesn't exist

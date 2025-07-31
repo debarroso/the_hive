@@ -4,29 +4,21 @@ This repository contains Ansible playbooks to fully automate the setup of a K3s 
 
 ## Prerequisites
 
-* **Ansible Controller**: A machine with Ansible installed to run these playbooks (e.g., your Mac Mini).
+* **Ansible Controller**: A machine with Ansible installed (e.g., your Mac Mini).
 * **Raspberry Pi Nodes**: A set of Raspberry Pis with a fresh install of a compatible OS (e.g., Raspberry Pi OS).
 * **SSH Access**: Passwordless SSH access from your Ansible controller to all Raspberry Pi nodes.
-* **Python `kubernetes-client`**: The Helm and Kubernetes Ansible modules require this. Install it with `pip install kubernetes-client`.
+* **Required CLI Tools**: `kubectl` and `helm` installed on your Ansible controller.
 
 ## Inventory Setup
 
 1.  Open the `hosts` file.
-2.  Under the `[the_hive]` group, list the hostnames or IP addresses of your Raspberry Pi nodes. You can assign host names in the `/etc/hosts` file. The first node in the list will become the control plane (master).
-
-    ```ini
-    [the_hive]
-    bee1
-    bee2
-    bee3
-    bee4
-    bee5
-    ```
+2.  Under the `[the_hive]` group, list the hostnames or IP addresses of your Raspberry Pi nodes. The first node in the list will become the control plane (master).
 3.  Update the `ansible_user` variable in `[all:vars]` to match the username on your Raspberry Pi nodes.
 
+---
 ## Installation and Setup
 
-Follow these steps in order to provision your K3s cluster. Run all commands from your Ansible controller machine.
+Run these commands from your Ansible controller to provision the base cluster.
 
 ### 1. Initial Node Preparation
 Ensures all nodes are up-to-date and have cgroups enabled. These playbooks will reboot the nodes.
@@ -67,49 +59,82 @@ mv k3s.yaml ~/.kube/config
 kubectl get nodes
 ```
 
-## Post-Installation
+## Application Stack Deployment
 
-### Verify the Cluster
-
-After the installation, you can verify that all nodes have joined the cluster. SSH into the master node (the first host in your inventory) and run the following command:
-
-```bash
-kubectl get nodes
-```
-
-You should see a list of all your nodes with a `Ready` status.
-
-# Application Stack Deployment
+Follow these steps to deploy the full application stack onto your running K3s cluster.
 
 ### 1. Prepare Nodes for Longhorn
 
-Installs `open-iscsi` and other dependencies required by Longhorn.
+Installs open-iscsi and other dependencies required by Longhorn.
 
 ```bash
 ansible-playbook -i hosts playbooks/setup_longhorn_playbook.yml
 ```
 
-### 2. Deploy Core Application Stack
+### 2. Create Namespaces and Grafana Secret
 
-Uses Helm to deploy Longhorn, Prefect, Prometheus, and Grafana to the cluster.
+Manually create the namespaces for your applications and the secret for the Grafana admin password.
+
+```bash
+# Create namespaces
+kubectl create namespace monitoring
+kubectl create namespace n8n
+
+# Create the Grafana admin secret (replace password)
+kubectl create secret generic prometheus-grafana-admin -n monitoring \
+  --from-literal=admin-user=admin \
+  --from-literal=admin-password='{enter a unique password here}'
+```
+
+### 3. Deploy Helm Application Stack
+
+Runs the main playbook to deploy Longhorn, Prefect, Prometheus, and Grafana.
 
 ```bash
 ansible-playbook -i hosts playbooks/deploy_helm_stack_playbook.yml
 ```
 
-### 3. Deploy n8n Workflow Automation
+### 4. Deploy n8n Workflow Automation
 
-Applies the raw Kubernetes manifest to deploy n8n.
+Applies the Kubernetes manifests to deploy n8n and its required network service.
 
 ```bash
-kubectl apply -f non-helm-deployments/n8n-deployment.yml
+kubectl apply -f non-helm-deployments/n8n.yml
+kubectl apply -f non-helm-deployments/n8n-service.yml
 ```
 
-# Cluster Maintenance
+## Verifying Your Services
 
-## Perform a Safe Rolling Upgrade
-This playbook safely cordons, drains, updates, and reboots one node at a time, ensuring cluster services remain available during OS-level upgrades.
+Use kubectl port-forward to access the UI for each service. Run each command in a separate terminal.
+
+    Grafana: `kubectl port-forward service/prometheus-grafana 3000:80 -n monitoring` (Access at http://localhost:3000)
+
+    Longhorn: `kubectl port-forward service/longhorn-frontend 8080:80 -n longhorn-system` (Access at http://localhost:8080)
+
+    Prefect: `kubectl port-forward service/prefect-server 4200:4200 -n prefect` (Access at http://localhost:4200)
+
+    n8n: `kubectl port-forward service/n8n-service 5678:5678 -n n8n` (Access at http://localhost:5678)
+
+## Cluster Maintenance and Reset
+
+### Perform a Safe Rolling Upgrade
+This playbook safely cordons, drains, updates, and reboots one node at a time.
+
+### Full Cluster Reset (Tear Down)
+To completely reset your cluster and remove all applications and data, follow these steps.
 
 ```bash
-ansible-playbook -i hosts playbooks/rolling_cluster_upgrade.yml
+# 1. Uninstall Helm and non-Helm applications
+ansible-playbook -i hosts playbooks/uninstall_stack_playbook.yml
+kubectl delete -f non-helm-deployments/n8n.yml
+kubectl delete -f non-helm-deployments/n8n-service.yml
+
+# 2. Force-delete all persistent data
+kubectl delete pvc --all -n monitoring
+kubectl delete pvc --all -n prefect
+kubectl delete pvc --all -n n8n
+kubectl delete pvc --all -n longhorn-system
+
+# 3. (Optional) For a scorched-earth reset, uninstall K3s from all nodes
+ansible-playbook -i hosts playbooks/reset_cluster_playbook.yml
 ```
