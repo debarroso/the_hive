@@ -28,7 +28,7 @@ This repository contains Ansible playbooks to fully automate the setup of a K3s 
 
 Follow these steps in order to provision your K3s cluster. Run all commands from your Ansible controller machine.
 
-### 1. Initial Node Preparation**
+### 1. Initial Node Preparation
 Ensures all nodes are up-to-date and have cgroups enabled. These playbooks will reboot the nodes.
 ```bash
 ansible-playbook -i hosts playbooks/initial_update_cluster_playbook.yml
@@ -102,7 +102,7 @@ ansible-playbook -i hosts playbooks/deploy_helm_stack_playbook.yml
 Applies the raw Kubernetes manifest to deploy n8n.
 
 ```bash
-kubectl apply -f n8n-deployment.yml
+kubectl apply -f non-helm-deployments/n8n-deployment.yml
 ```
 
 # Cluster Maintenance
