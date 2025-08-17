@@ -83,7 +83,7 @@ kubectl create namespace n8n
 # Create the Grafana admin secret (replace password)
 kubectl create secret generic prometheus-grafana-admin -n monitoring \
   --from-literal=admin-user=admin \
-  --from-literal=admin-password='{enter a unique password here}'
+  --from-literal=admin-password='enter a unique password here'
 ```
 
 
@@ -130,18 +130,39 @@ This playbook safely cordons, drains, updates, and reboots one node at a time.
 ### Full Cluster Reset (Tear Down)
 To completely reset your cluster and remove all applications and data, follow these steps.
 
-```bash
-# 1. Uninstall Helm and non-Helm applications
-ansible-playbook -i hosts playbooks/uninstall_stack_playbook.yml
-kubectl delete -f non-helm-deployments/n8n.yml
-kubectl delete -f non-helm-deployments/n8n-service.yml
+This process is designed to be robust and avoid the common issue where application namespaces get stuck in a 'Terminating' state due to Longhorn's storage finalizers. It works by first attempting a graceful uninstall, then forcefully removing the components that block deletion.
 
-# 2. Force-delete all persistent data
-kubectl delete pvc --all -n monitoring
-kubectl delete pvc --all -n prefect
-kubectl delete pvc --all -n n8n
-kubectl delete pvc --all -n longhorn-system
+```bash
+# 1. Uninstall all applications and Longhorn itself.
+# This begins the graceful deletion process. This step may hang as resources wait for finalizers to be cleared; the next steps will resolve this.
+
+echo "--- Starting uninstall of all applications..."
+ansible-playbook -i hosts playbooks/uninstall_stack_playbook.yml
+kubectl delete -f non-helm-deployments/n8n-deployment.yml --ignore-not-found 
+helm uninstall longhorn -n longhorn-system
+
+# 2. Forcefully Purge All Components and Resolve Stuck Namespaces
+# This is the critical step to resolve any deadlocks from the previous step.
+
+# First, delete the admission webhooks that prevent changes to Longhorn resources:
+echo "--- Deleting Longhorn webhooks..."
+kubectl delete mutatingwebhookconfiguration longhorn-mutator --ignore-not-found
+kubectl delete validatingwebhookconfiguration longhorn-validator --ignore-not-found
+
+# Second, for each application namespace, patch the PVCs to remove their finalizers.
+# This is the key step that unblocks namespace deletion.
+echo "--- Removing finalizers from all application PVCs..."
+for ns in n8n monitoring prefect; do echo "Patching PVCs in namespace: ns" kubectl get pvc -n "ns" -o name | xargs -r -I {} kubectl patch {} -n "$ns" -p '{"metadata":{"finalizers":[]}}' --type='merge' done
+
+# Third, now that the PVCs are unblocked, delete the application namespaces.
+echo "--- Deleting application namespaces..."
+kubectl delete namespace n8n monitoring prefect --ignore-not-found
+
+# Fourth, forcefully clean up any remaining Longhorn-specific resources and the namespace itself.
+echo "--- Forcefully purging the longhorn-system namespace..."
+kubectl get crd -o name | grep "longhorn.io" | xargs -r kubectl delete --ignore-not-found kubectl delete namespace longhorn-system --ignore-not-found
 
 # 3. (Optional) For a scorched-earth reset, uninstall K3s from all nodes
+echo "--- Uninstalling K3s from all nodes..."
 ansible-playbook -i hosts playbooks/reset_cluster_playbook.yml
 ```
