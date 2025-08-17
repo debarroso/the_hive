@@ -1,0 +1,38 @@
+---
+- name: Create and Enable Swap File
+  hosts: the_hive
+  become: true
+
+  tasks:
+    - name: Check if swap file already exists
+      ansible.builtin.stat:
+        path: /swapfile
+      register: swap_file_check
+
+    - name: Create a 1GB swap file
+      when: not swap_file_check.stat.exists
+      ansible.builtin.command: "fallocate -l 1G /swapfile"
+      changed_when: true
+
+    - name: Set correct permissions on swap file
+      when: not swap_file_check.stat.exists
+      ansible.builtin.file:
+        path: /swapfile
+        mode: '0600'
+
+    - name: Format the file for swap
+      when: not swap_file_check.stat.exists
+      community.general.filesystem:
+        fstype: swap
+        dev: /swapfile
+
+    - name: Add swap file to fstab for persistence
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '^/swapfile'
+        line: '/swapfile none swap sw 0 0'
+        state: present
+
+    - name: Enable the new swap file
+      ansible.builtin.command: "swapon -a"
+      changed_when: false # This command reports no change

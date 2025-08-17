@@ -86,7 +86,15 @@ kubectl create secret generic prometheus-grafana-admin -n monitoring \
   --from-literal=admin-password='{enter a unique password here}'
 ```
 
-### 3. Deploy Helm Application Stack
+
+### 3. Create Swap File
+Create a 1GB swap file, set it up, and configure it to be enabled on boot.
+
+```bash
+ansible-playbook -i hosts playbooks/create_swap_file_playbook.yml
+```
+
+### 4. Deploy Helm Application Stack
 
 Runs the main playbook to deploy Longhorn, Prefect, Prometheus, and Grafana.
 
@@ -94,13 +102,12 @@ Runs the main playbook to deploy Longhorn, Prefect, Prometheus, and Grafana.
 ansible-playbook -i hosts playbooks/deploy_helm_stack_playbook.yml
 ```
 
-### 4. Deploy n8n Workflow Automation
+### 5. Deploy n8n Workflow Automation
 
 Applies the Kubernetes manifests to deploy n8n and its required network service.
 
 ```bash
-kubectl apply -f non-helm-deployments/n8n.yml
-kubectl apply -f non-helm-deployments/n8n-service.yml
+kubectl apply -f non-helm-deployments/n8n-deployment.yml
 ```
 
 ## Verifying Your Services

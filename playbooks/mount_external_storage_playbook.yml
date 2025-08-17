@@ -1,46 +1,17 @@
 ---
-- name: Prepare and Mount External Storage by UUID
+- name: Prepare and Mount Multiple External Storage Drives
   hosts: the_hive
   become: true # Run all tasks with sudo
 
   vars:
-    storage_device: "/dev/sda"
-    storage_partition: "/dev/sda1"
-    mount_path: "/mnt/longhorn" # Using the final mount point from the start
+    # Define the drive(s)
+    disks_to_mount:
+      - { device: "/dev/sda", partition: "/dev/sda1", path: "/mnt/longhorn-1" }
+      # - { device: "/dev/sdb", partition: "/dev/sdb1", path: "/mnt/longhorn-2" }
 
   tasks:
-    - name: Partition the USB drive
-      community.general.parted:
-        device: "{{ storage_device }}"
-        number: 1
-        state: present
-        fs_type: ext4
-        label: gpt
-
-    - name: Create an ext4 filesystem on the partition
-      community.general.filesystem:
-        fstype: ext4
-        dev: "{{ storage_partition }}"
-
-    - name: Get the UUID of the new partition
-      ansible.builtin.command: "blkid -s UUID -o value {{ storage_partition }}"
-      register: blkid_result
-      changed_when: false
-
-    - name: Store the partition UUID as a fact
-      ansible.builtin.set_fact:
-        partition_uuid: "{{ blkid_result.stdout }}"
-
-    - name: Create the mount point directory
-      ansible.builtin.file:
-        path: "{{ mount_path }}"
-        state: directory
-        mode: '0755'
-
-    - name: Mount the drive by UUID and add it to fstab
-      ansible.builtin.mount:
-        path: "{{ mount_path }}"
-        src: "UUID={{ partition_uuid }}"
-        fstype: ext4
-        opts: defaults,nofail
-        state: mounted
+    - name: "Partition and format drive {{ item.device }}"
+      ansible.builtin.include_tasks: tasks/mount_disk.yml
+      loop: "{{ disks_to_mount }}"
+      loop_control:
+        loop_var: item

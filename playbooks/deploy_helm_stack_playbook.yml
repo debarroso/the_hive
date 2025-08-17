@@ -48,6 +48,13 @@
         release_namespace: longhorn-system
         state: present
         create_namespace: true
+        values:
+          persistence:
+            defaultNodeConfig:
+              disks:
+                disk-1:
+                  path: "/mnt/longhorn-1"
+              createDefaultDisk: true
 
     # ------------- Prefect Server Deployment (Application Layer) -------------
     - name: Deploy or Upgrade the Prefect Server chart
