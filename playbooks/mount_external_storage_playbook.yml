@@ -3,11 +3,8 @@
   hosts: the_hive
   become: true # Run all tasks with sudo
 
-  vars:
-    # Define the drive(s)
-    disks_to_mount:
-      - { device: "/dev/sda", partition: "/dev/sda1", path: "/mnt/longhorn-1" }
-      # - { device: "/dev/sdb", partition: "/dev/sdb1", path: "/mnt/longhorn-2" }
+  vars_files:
+    - storage_vars.yml
 
   tasks:
     - name: "Partition and format drive {{ item.device }}"

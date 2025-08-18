@@ -76,16 +76,14 @@ ansible-playbook -i hosts playbooks/setup_longhorn_playbook.yml
 Manually create the namespaces for your applications and the secret for the Grafana admin password.
 
 ```bash
-# Create namespaces
+# Create namespace for monitoring (to create creds for Grafana)
 kubectl create namespace monitoring
-kubectl create namespace n8n
 
 # Create the Grafana admin secret (replace password)
 kubectl create secret generic prometheus-grafana-admin -n monitoring \
   --from-literal=admin-user=admin \
   --from-literal=admin-password='enter a unique password here'
 ```
-
 
 ### 3. Create Swap File
 Create a 1GB swap file, set it up, and configure it to be enabled on boot.

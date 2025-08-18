@@ -4,8 +4,7 @@
   gather_facts: false
 
   vars_files:
-    # Read the variables directly from the mounting playbook.
-    - mount_external_storage_playbook.yml
+    - storage_vars.yml
 
   tasks:
     # ------------- Dependency Installation -------------
@@ -44,6 +43,17 @@
       changed_when: false
       run_once: true
 
+    - name: Create Longhorn disk configuration object
+      ansible.builtin.set_fact:
+        longhorn_disks_dict: >-
+          {%- set d = {} -%}
+          {%- for item in disks_to_mount -%}
+          {%-   set _ = d.update({item.device: {'path': item.path}}) -%}
+          {%- endfor -%}
+          {{ d }}
+      run_once: true
+
+
     # ------------- Longhorn Deployment (Storage Layer) -------------
     - name: Deploy or Upgrade the Longhorn chart
       kubernetes.core.helm:
@@ -59,9 +69,8 @@
           persistence:
             defaultNodeConfig:
               # Dynamically build the list of disks from the vars_files
-              disks: "{{ disks_to_mount | items2dict(key_name='device', value_name='path') | combine({item.device: {'path': item.path}}, recursive=True) }}"
+              disks: "{{ longhorn_disks_dict }}"
               createDefaultDisk: true
-
 
     # ------------- Prefect Server Deployment (Application Layer) -------------
     - name: Deploy or Upgrade the Prefect Server chart
@@ -125,8 +134,8 @@
         name: "{{ prefect_server_pod_name }}"
         namespace: prefect
       register: pod_status
-      retries: 30
-      delay: 10
+      retries: 15
+      delay: 30
       # Wait until the pod exists and its 'Ready' condition is 'True'
       until:
         - pod_status.resources | length > 0
