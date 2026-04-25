@@ -13,7 +13,14 @@
 
     - name: Drain the node of all running pods
       become: false
-      ansible.builtin.command: "kubectl drain {{ inventory_hostname }} --ignore-daemonsets --delete-emptydir-data"
+      ansible.builtin.command: >
+        kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --force
+        --timeout=300s
+        --skip-wait-for-delete-timeout=60
+        --disable-eviction
       delegate_to: localhost
 
     - name: Update apt cache and upgrade packages
@@ -34,6 +41,36 @@
       retries: 30  # Try 30 times
       delay: 10    # Wait 10 seconds between each try (5 minutes total)
       changed_when: false # This command doesn't change state, so we report no change
+
+    - name: Check if Prefect Server deployment exists
+      become: false
+      ansible.builtin.command: "kubectl get deployment prefect-server -n prefect"
+      delegate_to: localhost
+      register: prefect_server_check
+      failed_when: false
+      changed_when: false
+
+    - name: Wait for Prefect Server to be fully stable
+      become: false
+      ansible.builtin.command: "kubectl rollout status deployment/prefect-server -n prefect --timeout=300s"
+      delegate_to: localhost
+      changed_when: false
+      when: prefect_server_check.rc == 0
+
+    - name: Check if Prefect Worker deployment exists
+      become: false
+      ansible.builtin.command: "kubectl get deployment prefect-worker -n prefect"
+      delegate_to: localhost
+      register: prefect_worker_check
+      failed_when: false
+      changed_when: false
+
+    - name: Wait for Prefect Worker to be fully stable
+      become: false
+      ansible.builtin.command: "kubectl rollout status deployment/prefect-worker -n prefect --timeout=300s"
+      delegate_to: localhost
+      changed_when: false
+      when: prefect_worker_check.rc == 0
 
     - name: Uncordon the node to bring it back into service
       become: false

@@ -1,4 +1,3 @@
----
 - name: Deploy Full Stack via Helm
   hosts: localhost
   gather_facts: false
@@ -80,13 +79,40 @@
         release_namespace: prefect
         state: present
         create_namespace: true
+        wait: true # Wait for pods to be ready to avoid migration race conditions
+        timeout: "10m0s"
         values:
-          # Corrected values structure for persistent storage
+          # Database Configuration
           postgresql:
             persistence:
               enabled: true
               storageClassName: "longhorn"
               size: 5Gi
+            # Stability Fix: Increase resources and relax probes for Raspberry Pi
+            primary:
+              resources:
+                limits:
+                  memory: 1Gi
+                requests:
+                  memory: 512Mi
+              livenessProbe:
+                initialDelaySeconds: 300
+                periodSeconds: 30
+                timeoutSeconds: 30
+                failureThreshold: 10
+              readinessProbe:
+                initialDelaySeconds: 300
+                periodSeconds: 30
+                timeoutSeconds: 30
+                failureThreshold: 10
+
+          # Server Configuration (Correctly indented at the top level)
+          server:
+            resources:
+              limits:
+                memory: 2Gi
+              requests:
+                memory: 1Gi
       register: prefect_server_install
 
     # ------------- Prefect Worker Deployment (Execution Layer) -------------
@@ -107,8 +133,8 @@
 
     # ------------- Prefect Database and Work Pool Initialization -------------
     - name: Get the name of the new Prefect Server pod
-      # This task runs only if the Helm install/upgrade reported a change
-      when: prefect_server_install.changed
+      # Check if variable exists before accessing .changed
+      when: prefect_server_install.changed | default(false)
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Pod
@@ -122,12 +148,12 @@
       until: "prefect_pod_info.resources | length > 0 and prefect_pod_info.resources[0].status.phase == 'Running'"
 
     - name: Set a fact for the server pod name for easier use
-      when: prefect_server_install.changed
+      when: prefect_server_install.changed | default(false)
       ansible.builtin.set_fact:
         prefect_server_pod_name: "{{ prefect_pod_info.resources[0].metadata.name }}"
 
     - name: Wait for the Prefect Server pod to be fully ready
-      when: prefect_server_install.changed
+      when: prefect_server_install.changed | default(false)
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Pod
@@ -155,7 +181,7 @@
 
     - name: Run Prefect database migrations (if receipt does not exist)
       # Only run if the Helm install happened AND the receipt is missing
-      when: prefect_server_install.changed and migration_receipt.resources | length == 0
+      when: (prefect_server_install.changed | default(false)) and (migration_receipt.resources | length == 0)
       kubernetes.core.k8s_exec:
         namespace: prefect
         pod: "{{ prefect_server_pod_name }}"
@@ -164,17 +190,20 @@
       changed_when: "'Migrations succeeded!' in db_upgrade_result.stdout"
 
     - name: Create the default Kubernetes work pool (if receipt does not exist)
-      when: prefect_server_install.changed and migration_receipt.resources | length == 0
+      when: (prefect_server_install.changed | default(false)) and (migration_receipt.resources | length == 0)
       kubernetes.core.k8s_exec:
         namespace: prefect
         pod: "{{ prefect_server_pod_name }}"
         command: "prefect work-pool create 'default-agent-pool' --type kubernetes"
       register: pool_create_result
+      # Fixed logic: Fail only if rc!=0 AND the error isn't about it already existing
+      failed_when: 
+        - pool_create_result.rc != 0
+        - "'already exists' not in pool_create_result.stdout"
       changed_when: "'Created work pool' in pool_create_result.stdout"
-      failed_when: "pool_create_result.stderr and 'already exists' not in pool_create_result.stderr"
 
     - name: Create migration receipt to prevent future runs
-      when: prefect_server_install.changed and migration_receipt.resources | length == 0
+      when: (prefect_server_install.changed | default(false)) and (migration_receipt.resources | length == 0)
       kubernetes.core.k8s:
         state: present
         definition:
@@ -185,9 +214,27 @@
             namespace: prefect
           data:
             status: "completed"
-            timestamp: "{{ ansible_date_time.iso8601 }}"
+            timestamp: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
 
     # ------------- Prometheus Deployment (Monitoring Backend) -------------
+    
+    # NEW TASK: Create the Grafana secret explicitly
+    - name: Create Grafana admin secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: prometheus-grafana-admin
+            namespace: monitoring
+          type: Opaque
+          data:
+            # "admin" base64 encoded is YWRtaW4=
+            # "prom-operator" base64 encoded is cHJvbS1vcGVyYXRvcg==
+            admin-user: YWRtaW4=
+            admin-password: cHJvbS1vcGVyYXRvcg==
+
     - name: Deploy or Upgrade the Prometheus Stack chart
       kubernetes.core.helm:
         name: prometheus
@@ -215,3 +262,17 @@
                     resources:
                       requests:
                         storage: 20Gi
+
+    # ------------- n8n Deployment (Direct Manifest) -------------
+    - name: Ensure n8n Namespace Exists
+      kubernetes.core.k8s:
+        name: n8n
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    - name: Deploy n8n from Local Manifest
+      kubernetes.core.k8s:
+        state: present
+        src: "../non-helm-deployments/n8n-deployment.yml"
+        namespace: n8n

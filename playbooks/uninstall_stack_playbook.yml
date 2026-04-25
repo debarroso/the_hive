@@ -1,4 +1,3 @@
----
 - name: Uninstall Full Stack
   hosts: localhost
   gather_facts: false
@@ -28,6 +27,15 @@
         release_namespace: prefect
         state: absent
 
+    # Note: n8n is now a direct manifest deployment, but removing the namespace handles it.
+    # We remove the helm uninstall task just in case it was installed that way before.
+    - name: Uninstall the n8n chart
+      kubernetes.core.helm:
+        name: n8n
+        release_namespace: n8n
+        state: absent
+      ignore_errors: true
+
     - name: Forcefully Uninstall the Longhorn chart via command line
       ansible.builtin.command:
         cmd: helm uninstall longhorn -n longhorn-system --no-hooks
@@ -36,6 +44,7 @@
       failed_when:
         - helm_uninstall_result.rc != 0
         - "'release: not found' not in helm_uninstall_result.stderr"
+      ignore_errors: true
 
     - name: Remove the Grafana admin secret
       kubernetes.core.k8s:
@@ -43,3 +52,44 @@
         kind: Secret
         name: grafana-admin-creds
         namespace: monitoring
+
+    # ------------- Namespace Deletion & Cleanup -------------
+    - name: Delete Namespaces (removes all remaining resources)
+      kubernetes.core.k8s:
+        state: absent
+        kind: Namespace
+        name: "{{ item }}"
+      loop:
+        - prefect
+        - monitoring
+        - longhorn-system
+        - n8n
+      register: delete_ns_result
+
+    - name: Wait for namespaces to terminate (timeout 60s)
+      ansible.builtin.shell: "kubectl get ns {{ item }} --no-headers 2>/dev/null || echo 'NotFound'"
+      register: ns_check
+      loop:
+        - prefect
+        - monitoring
+        - longhorn-system
+        - n8n
+      until: "'NotFound' in ns_check.stdout"
+      retries: 6
+      delay: 10
+      changed_when: false
+      failed_when: false # Don't fail yet, we will force clean next
+
+    - name: Force delete stuck namespaces (remove finalizers)
+      ansible.builtin.shell: |
+        kubectl get namespace {{ item }} -o json | \
+        jq 'del(.spec.finalizers[] | select(. == "kubernetes"))' | \
+        kubectl replace --raw "/api/v1/namespaces/{{ item }}/finalize" -f -
+      loop:
+        - prefect
+        - monitoring
+        - longhorn-system
+        - n8n
+      when: "'NotFound' not in (ns_check.results | selectattr('item', 'equalto', item) | first).stdout"
+      ignore_errors: true
+      changed_when: true

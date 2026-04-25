@@ -42,7 +42,9 @@ spec:
         fsGroup: 1000
       containers:
         - name: n8n
-          image: n8nio/n8n:nightly-arm64
+          # Using the official latest tag which supports ARM64
+          image: n8nio/n8n:latest
+          imagePullPolicy: Always
           command: ["n8n"]
           args: []
           ports:
