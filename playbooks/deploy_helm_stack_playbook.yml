@@ -3,32 +3,149 @@
   gather_facts: false
 
   vars_files:
-    - storage_vars.yml
+    - network_vars.yml
 
   tasks:
-    # ------------- Dependency Installation -------------
-    - name: Ensure Python dependencies for Kubernetes are installed
-      ansible.builtin.pip:
-        name: kubernetes-client
+    - name: Require a persistent Prefect database password
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.env', 'PREFECT_POSTGRES_PASSWORD') | length > 0
+          - lookup('ansible.builtin.env', 'PREFECT_POSTGRES_PASSWORD') is match('^[A-Za-z0-9._~-]+$')
+        fail_msg: Set PREFECT_POSTGRES_PASSWORD to the existing database password or a new URL-safe password using letters, digits, period, underscore, tilde, or hyphen.
+
+    - name: Require a reserved LAN address for the first K3s node
+      ansible.builtin.assert:
+        that:
+          - lan_ip is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+          - lan_domain | length > 0
+          - pihole_upstream_dns | length > 0
+        fail_msg: Set lan_ip to the first K3s node's reserved IPv4 address in playbooks/network_vars.yml.
+
+    - name: Confirm the LAN address belongs to the first K3s node
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        name: "{{ groups['the_hive'][0] }}"
+      register: lan_node
+
+    - name: Require the selected node to report the reserved LAN address
+      ansible.builtin.assert:
+        that:
+          - lan_node.resources | length == 1
+          - lan_ip in ((lan_node.resources | first | default({})).get('status', {}).get('addresses', []) | selectattr('type', 'equalto', 'InternalIP') | map(attribute='address') | list)
+        fail_msg: The lan_ip in playbooks/network_vars.yml must match the first K3s node's InternalIP.
+
+    - name: Check for K3s local storage
+      kubernetes.core.k8s_info:
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+        name: local-path
+      register: local_path_class
+
+    - name: Require the bundled local-path provisioner
+      ansible.builtin.assert:
+        that:
+          - local_path_class.resources | length == 1
+          - (local_path_class.resources | first | default({})).get('provisioner') == 'rancher.io/local-path'
+        fail_msg: Install K3s with its bundled local-path provisioner before deploying the stack.
+
+    - name: Ensure application namespaces exist for pre-created secrets
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
         state: present
+      loop:
+        - monitoring
+        - n8n
+        - pihole
+        - prefect
+
+    - name: Check for the Grafana admin secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: prometheus-grafana-admin
+        namespace: monitoring
+      register: grafana_secret
+      no_log: true
+
+    - name: Require a Grafana admin secret supplied by the operator
+      ansible.builtin.assert:
+        that:
+          - grafana_secret.resources | length == 1
+          - "'admin-user' in (grafana_secret.resources | first | default({})).get('data', {})"
+          - "'admin-password' in (grafana_secret.resources | first | default({})).get('data', {})"
+        fail_msg: Create monitoring/prometheus-grafana-admin with admin-user and admin-password before deploying the stack.
+
+    - name: Check for the n8n configuration secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: n8n-secrets
+        namespace: n8n
+      register: n8n_secret
+      no_log: true
+
+    - name: Require an n8n configuration secret supplied by the operator
+      ansible.builtin.assert:
+        that:
+          - n8n_secret.resources | length == 1
+          - "'N8N_ENCRYPTION_KEY' in (n8n_secret.resources | first | default({})).get('data', {})"
+          - "'N8N_HOST' in (n8n_secret.resources | first | default({})).get('data', {})"
+          - "'N8N_PORT' in (n8n_secret.resources | first | default({})).get('data', {})"
+          - "'N8N_PROTOCOL' in (n8n_secret.resources | first | default({})).get('data', {})"
+          - "((n8n_secret.resources | first | default({})).get('data', {}).get('N8N_ENCRYPTION_KEY', '') | b64decode | length) >= 32"
+          - "(n8n_secret.resources | first | default({})).get('data', {}).get('N8N_HOST', '') | b64decode == 'n8n.' ~ lan_domain"
+          - "(n8n_secret.resources | first | default({})).get('data', {}).get('N8N_PORT', '') | b64decode == '5678'"
+          - "(n8n_secret.resources | first | default({})).get('data', {}).get('N8N_PROTOCOL', '') | b64decode == 'http'"
+        fail_msg: Create n8n/n8n-secrets with an encryption key, N8N_HOST=n8n.<lan_domain>, N8N_PORT=5678, and N8N_PROTOCOL=http before deploying the stack.
+
+    - name: Check for the Pi-hole admin password secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: pihole-admin
+        namespace: pihole
+      register: pihole_secret
+      no_log: true
+
+    - name: Require a Pi-hole admin password supplied by the operator
+      ansible.builtin.assert:
+        that:
+          - pihole_secret.resources | length == 1
+          - "'password' in (pihole_secret.resources | first | default({})).get('data', {})"
+          - "((pihole_secret.resources | first | default({})).get('data', {}).get('password', '') | b64decode | length) > 0"
+        fail_msg: Create pihole/pihole-admin with a password key before deploying the stack.
+
+    - name: Check for LAN basic-auth secrets
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: lan-basic-auth
+        namespace: "{{ item }}"
+      loop:
+        - prefect
+        - monitoring
+      register: lan_auth_secrets
+      no_log: true
+
+    - name: Require LAN basic-auth secrets for management UIs
+      ansible.builtin.assert:
+        that:
+          - item.resources | length == 1
+          - "'auth' in (item.resources | first | default({})).get('data', {})"
+          - "((item.resources | first | default({})).get('data', {}).get('auth', '') | b64decode | length) > 0"
+        fail_msg: Create a lan-basic-auth secret with an auth key in prefect and monitoring.
+      loop: "{{ lan_auth_secrets.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     # ------------- Helm Repository Setup -------------
-    - name: Add the Longhorn Helm repository
-      kubernetes.core.helm_repository:
-        name: longhorn
-        repo_url: "https://charts.longhorn.io"
-        state: present
-
     - name: Add the Prefect Helm repository
       kubernetes.core.helm_repository:
         name: prefect
         repo_url: "https://prefecthq.github.io/prefect-helm"
-        state: present
-
-    - name: Add the Grafana Helm repository
-      kubernetes.core.helm_repository:
-        name: grafana
-        repo_url: "https://grafana.github.io/helm-charts"
         state: present
 
     - name: Add the Prometheus Community Helm repository
@@ -41,35 +158,6 @@
       ansible.builtin.command: "helm repo update"
       changed_when: false
       run_once: true
-
-    - name: Create Longhorn disk configuration object
-      ansible.builtin.set_fact:
-        longhorn_disks_dict: >-
-          {%- set d = {} -%}
-          {%- for item in disks_to_mount -%}
-          {%-   set _ = d.update({item.device: {'path': item.path}}) -%}
-          {%- endfor -%}
-          {{ d }}
-      run_once: true
-
-
-    # ------------- Longhorn Deployment (Storage Layer) -------------
-    - name: Deploy or Upgrade the Longhorn chart
-      kubernetes.core.helm:
-        name: longhorn
-        chart_ref: longhorn/longhorn
-        release_namespace: longhorn-system
-        state: present
-        create_namespace: true
-        values:
-          defaultSettings:
-            defaultDataPath: "{{ disks_to_mount[0].path }}" # Use the first disk's path as the default
-            createDefaultDiskLabeledNodes: false
-          persistence:
-            defaultNodeConfig:
-              # Dynamically build the list of disks from the vars_files
-              disks: "{{ longhorn_disks_dict }}"
-              createDefaultDisk: true
 
     # ------------- Prefect Server Deployment (Application Layer) -------------
     - name: Deploy or Upgrade the Prefect Server chart
@@ -84,36 +172,28 @@
         values:
           # Database Configuration
           postgresql:
-            persistence:
-              enabled: true
-              storageClassName: "longhorn"
-              size: 5Gi
-            # Stability Fix: Increase resources and relax probes for Raspberry Pi
+            auth:
+              password: "{{ lookup('ansible.builtin.env', 'PREFECT_POSTGRES_PASSWORD') }}"
             primary:
+              persistence:
+                enabled: true
+                storageClass: local-path
+                size: 5Gi
               resources:
                 limits:
                   memory: 1Gi
                 requests:
                   memory: 512Mi
-              livenessProbe:
-                initialDelaySeconds: 300
-                periodSeconds: 30
-                timeoutSeconds: 30
-                failureThreshold: 10
-              readinessProbe:
-                initialDelaySeconds: 300
-                periodSeconds: 30
-                timeoutSeconds: 30
-                failureThreshold: 10
 
-          # Server Configuration (Correctly indented at the top level)
           server:
+            uiConfig:
+              prefectUiApiUrl: "https://prefect.{{ lan_domain }}/api"
             resources:
               limits:
                 memory: 2Gi
               requests:
                 memory: 1Gi
-      register: prefect_server_install
+      no_log: true
 
     # ------------- Prefect Worker Deployment (Execution Layer) -------------
     - name: Deploy or Upgrade the Prefect Worker chart
@@ -131,110 +211,7 @@
             selfHostedServerApiConfig:
               apiUrl: "http://prefect-server.prefect.svc.cluster.local:4200/api"
 
-    # ------------- Prefect Database and Work Pool Initialization -------------
-    - name: Get the name of the new Prefect Server pod
-      # Check if variable exists before accessing .changed
-      when: prefect_server_install.changed | default(false)
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Pod
-        namespace: prefect
-        label_selectors:
-          - "app.kubernetes.io/name=prefect-server"
-          - "app.kubernetes.io/instance=prefect-server"
-      register: prefect_pod_info
-      retries: 10
-      delay: 15
-      until: "prefect_pod_info.resources | length > 0 and prefect_pod_info.resources[0].status.phase == 'Running'"
-
-    - name: Set a fact for the server pod name for easier use
-      when: prefect_server_install.changed | default(false)
-      ansible.builtin.set_fact:
-        prefect_server_pod_name: "{{ prefect_pod_info.resources[0].metadata.name }}"
-
-    - name: Wait for the Prefect Server pod to be fully ready
-      when: prefect_server_install.changed | default(false)
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Pod
-        name: "{{ prefect_server_pod_name }}"
-        namespace: prefect
-      register: pod_status
-      retries: 15
-      delay: 30
-      # Wait until the pod exists and its 'Ready' condition is 'True'
-      until:
-        - pod_status.resources | length > 0
-        - pod_status.resources[0].status.conditions is defined
-        - (pod_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | list | first).status == 'True'
-      changed_when: false
-
-    # ------------- Prefect Database and Work Pool Initialization -------------
-    - name: Check if Prefect DB migration receipt exists
-      kubernetes.core.k8s_info:
-        kind: ConfigMap
-        name: prefect-db-migration-receipt
-        namespace: prefect
-      register: migration_receipt
-      # This is crucial because the task would fail if the ConfigMap doesn't exist
-      ignore_errors: true
-
-    - name: Run Prefect database migrations (if receipt does not exist)
-      # Only run if the Helm install happened AND the receipt is missing
-      when: (prefect_server_install.changed | default(false)) and (migration_receipt.resources | length == 0)
-      kubernetes.core.k8s_exec:
-        namespace: prefect
-        pod: "{{ prefect_server_pod_name }}"
-        command: "prefect server database upgrade -y"
-      register: db_upgrade_result
-      changed_when: "'Migrations succeeded!' in db_upgrade_result.stdout"
-
-    - name: Create the default Kubernetes work pool (if receipt does not exist)
-      when: (prefect_server_install.changed | default(false)) and (migration_receipt.resources | length == 0)
-      kubernetes.core.k8s_exec:
-        namespace: prefect
-        pod: "{{ prefect_server_pod_name }}"
-        command: "prefect work-pool create 'default-agent-pool' --type kubernetes"
-      register: pool_create_result
-      # Fixed logic: Fail only if rc!=0 AND the error isn't about it already existing
-      failed_when: 
-        - pool_create_result.rc != 0
-        - "'already exists' not in pool_create_result.stdout"
-      changed_when: "'Created work pool' in pool_create_result.stdout"
-
-    - name: Create migration receipt to prevent future runs
-      when: (prefect_server_install.changed | default(false)) and (migration_receipt.resources | length == 0)
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: prefect-db-migration-receipt
-            namespace: prefect
-          data:
-            status: "completed"
-            timestamp: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
-
     # ------------- Prometheus Deployment (Monitoring Backend) -------------
-    
-    # NEW TASK: Create the Grafana secret explicitly
-    - name: Create Grafana admin secret
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: prometheus-grafana-admin
-            namespace: monitoring
-          type: Opaque
-          data:
-            # "admin" base64 encoded is YWRtaW4=
-            # "prom-operator" base64 encoded is cHJvbS1vcGVyYXRvcg==
-            admin-user: YWRtaW4=
-            admin-password: cHJvbS1vcGVyYXRvcg==
-
     - name: Deploy or Upgrade the Prometheus Stack chart
       kubernetes.core.helm:
         name: prometheus
@@ -250,29 +227,55 @@
             persistence:
               enabled: true
               type: pvc
-              storageClassName: "longhorn"
+              storageClassName: "local-path"
               size: 5Gi
           prometheus:
             prometheusSpec:
               storageSpec:
                 volumeClaimTemplate:
                   spec:
-                    storageClassName: "longhorn"
+                    storageClassName: "local-path"
                     accessModes: [ "ReadWriteOnce" ]
                     resources:
                       requests:
                         storage: 20Gi
 
-    # ------------- n8n Deployment (Direct Manifest) -------------
-    - name: Ensure n8n Namespace Exists
-      kubernetes.core.k8s:
+    # ------------- n8n Deployment (Standalone Helm Chart) -------------
+    - name: Deploy or upgrade the official n8n Helm chart
+      kubernetes.core.helm:
         name: n8n
-        api_version: v1
-        kind: Namespace
+        chart_ref: oci://ghcr.io/n8n-io/n8n-helm-chart/n8n
+        chart_version: 1.14.0
+        release_namespace: n8n
         state: present
+        create_namespace: true
+        wait: true
+        timeout: "10m0s"
+        values:
+          queueMode:
+            enabled: false
+          database:
+            type: sqlite
+            useExternal: false
+          redis:
+            enabled: false
+          persistence:
+            enabled: true
+            storageClassName: local-path
+            size: 5Gi
+          strategy:
+            type: Recreate
+          config:
+            timezone: America/Chicago
+            extraEnv:
+              - name: N8N_EDITOR_BASE_URL
+                value: "https://n8n.{{ lan_domain }}/"
+              - name: N8N_WEBHOOK_URL
+                value: "https://n8n.{{ lan_domain }}/"
+              - name: N8N_PROXY_HOPS
+                value: "1"
+          secretRefs:
+            existingSecret: n8n-secrets
 
-    - name: Deploy n8n from Local Manifest
-      kubernetes.core.k8s:
-        state: present
-        src: "../non-helm-deployments/n8n-deployment.yml"
-        namespace: n8n
+    - name: Deploy Pi-hole and LAN ingress routes
+      ansible.builtin.import_tasks: tasks/deploy_lan_services.yml

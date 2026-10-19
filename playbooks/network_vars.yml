@@ -1,0 +1,8 @@
+---
+# Reserve this address for the first K3s node (bee1 by default) in your router.
+# Traefik and K3s ServiceLB expose HTTP and Pi-hole DNS on that node.
+lan_ip: ""
+lan_domain: hive.home
+pihole_upstream_dns:
+  - 1.1.1.1
+  - 9.9.9.9

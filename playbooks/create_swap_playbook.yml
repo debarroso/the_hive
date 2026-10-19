@@ -15,7 +15,6 @@
       changed_when: true
 
     - name: Set correct permissions on swap file
-      when: not swap_file_check.stat.exists
       ansible.builtin.file:
         path: /swapfile
         mode: '0600'
@@ -33,6 +32,11 @@
         line: '/swapfile none swap sw 0 0'
         state: present
 
-    - name: Enable the new swap file
-      ansible.builtin.command: "swapon -a"
-      changed_when: false # This command reports no change
+    - name: Check active swap files
+      ansible.builtin.command: swapon --show --noheadings --output NAME
+      register: active_swap_files
+      changed_when: false
+
+    - name: Enable the swap file
+      ansible.builtin.command: swapon /swapfile
+      when: "'/swapfile' not in active_swap_files.stdout_lines"

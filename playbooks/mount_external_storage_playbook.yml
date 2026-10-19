@@ -7,8 +7,23 @@
     - storage_vars.yml
 
   tasks:
+    - name: Check the two-drive configuration before partitioning
+      ansible.builtin.assert:
+        that:
+          - disks_to_mount | length >= 1
+          - k3s_data_mount | length == 0 or k3s_data_mount in (disks_to_mount | map(attribute='path') | list)
+          - k3s_data_mount | length == 0 or k3s_data_mount != disks_to_mount[0].path
+          - k3s_data_mount | length == 0 or k3s_data_dir is match('^' ~ (k3s_data_mount | regex_escape) ~ '/')
+        fail_msg: "Put the volume drive first in disks_to_mount and, if used, configure a separate mounted drive for k3s_data_dir."
+
     - name: "Partition and format drive {{ item.device }}"
       ansible.builtin.include_tasks: tasks/mount_disk.yml
       loop: "{{ disks_to_mount }}"
       loop_control:
         loop_var: item
+
+    - name: Create the K3s local volume directory on the mounted drive
+      ansible.builtin.file:
+        path: "{{ local_storage_path }}"
+        state: directory
+        mode: '0755'

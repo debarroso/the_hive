@@ -1,4 +1,33 @@
 ---
+- name: Inspect existing mounts on the selected drive
+  ansible.builtin.command:
+    argv: [lsblk, -nr, -o, MOUNTPOINTS, "{{ item.device }}"]
+  register: selected_drive_mounts
+  changed_when: false
+
+- name: Refuse to partition the OS drive
+  ansible.builtin.assert:
+    that:
+      - "'/' not in (selected_drive_mounts.stdout_lines | map('trim') | list)"
+      - "'/boot' not in (selected_drive_mounts.stdout_lines | map('trim') | list)"
+      - "'/boot/firmware' not in (selected_drive_mounts.stdout_lines | map('trim') | list)"
+    fail_msg: "{{ item.device }} contains the mounted OS or boot filesystem. Select a different drive in storage_vars.yml."
+
+- name: Read the selected drive capacity when an expected size is configured
+  ansible.builtin.command:
+    argv: [lsblk, -bnd, -o, SIZE, "{{ item.device }}"]
+  register: selected_drive_size
+  changed_when: false
+  when: item.expected_size_gb is defined
+
+- name: Require the selected drive to have the expected capacity
+  ansible.builtin.assert:
+    that:
+      - (selected_drive_size.stdout | trim | int) >= ((item.expected_size_gb | int) * 850000000)
+      - (selected_drive_size.stdout | trim | int) <= ((item.expected_size_gb | int) * 1150000000)
+    fail_msg: "{{ item.device }} is not approximately {{ item.expected_size_gb }} GB. Verify drive enumeration before partitioning."
+  when: item.expected_size_gb is defined
+
 - name: Partition the USB drive
   community.general.parted:
     device: "{{ item.device }}"
@@ -28,7 +57,7 @@
     mode: '0755'
 
 - name: Mount the drive by UUID and add it to fstab
-  ansible.builtin.mount:
+  ansible.posix.mount:
     path: "{{ item.path }}"
     src: "UUID={{ partition_uuid }}"
     fstype: ext4

@@ -1,42 +1,111 @@
 ---
-- name: Get IP address for all nodes
+- name: Verify mounted storage before installing K3s
   hosts: the_hive
+  become: true
+  vars_files:
+    - storage_vars.yml
   tasks:
-    - name: Get the IP address of the node
-      ansible.builtin.setup:
-        filter: ansible_default_ipv4.address
+    - name: Find the filesystem backing the local volume directory
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - --noheadings
+          - --output
+          - TARGET
+          - --target
+          - "{{ local_storage_path }}"
+      register: local_storage_mount
+      changed_when: false
+
+    - name: Require the configured external drive to be mounted
+      ansible.builtin.assert:
+        that:
+          - local_storage_mount.stdout | trim == disks_to_mount[0].path
+        fail_msg: "Mount {{ disks_to_mount[0].path }} before installing K3s; local volumes must not land on the OS drive."
+
+    - name: Find the filesystem backing the optional K3s data directory
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --output, TARGET, --target, "{{ k3s_data_mount }}"]
+      register: k3s_data_mount_check
+      changed_when: false
+      when: k3s_data_mount | length > 0
+
+    - name: Require the optional K3s runtime drive to be mounted
+      ansible.builtin.assert:
+        that:
+          - k3s_data_mount_check.stdout | trim == k3s_data_mount
+          - k3s_data_dir is match('^' ~ (k3s_data_mount | regex_escape) ~ '/')
+          - k3s_data_mount != disks_to_mount[0].path
+        fail_msg: "Mount the separate K3s runtime drive at {{ k3s_data_mount }} before installing K3s."
+      when: k3s_data_mount | length > 0
+
+    - name: Create the K3s systemd override directory
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ 'k3s' if inventory_hostname == groups['the_hive'][0] else 'k3s-agent' }}.service.d"
+        state: directory
+        mode: '0755'
+
+    - name: Require the storage mount when starting K3s
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ 'k3s' if inventory_hostname == groups['the_hive'][0] else 'k3s-agent' }}.service.d/10-local-storage.conf"
+        content: |
+          [Unit]
+          RequiresMountsFor={{ disks_to_mount[0].path }}{% if k3s_data_mount | length > 0 %} {{ k3s_data_mount }}{% endif %}
+          AssertPathIsMountPoint={{ disks_to_mount[0].path }}
+          {% if k3s_data_mount | length > 0 %}AssertPathIsMountPoint={{ k3s_data_mount }}{% endif %}
+        mode: '0644'
+      register: storage_service_override
+
+    - name: Reload systemd after configuring the storage dependency
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: storage_service_override.changed
 
 - name: Install K3s on the Master Node
   hosts: the_hive[0]
   become: true
+  vars_files:
+    - storage_vars.yml
   tasks:
     - name: Install K3s server
-      ansible.builtin.shell: >
-        curl -sfL https://get.k3s.io | sh -s - server
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL https://get.k3s.io | sh -s - server --default-local-storage-path {{ local_storage_path | quote }} --data-dir {{ k3s_data_dir | quote }}
       args:
         creates: /etc/systemd/system/k3s.service
+        executable: /bin/bash
 
 - name: Get the Join Token from the Master
   hosts: the_hive[0]
   become: true
+  vars_files:
+    - storage_vars.yml
   tasks:
     - name: Wait for node-token to be created
       ansible.builtin.wait_for:
-        path: /var/lib/rancher/k3s/server/node-token
+        path: "{{ k3s_data_dir }}/server/node-token"
         timeout: 60
 
-    - name: Fetch the token file from the master
-      ansible.builtin.fetch:
-        src: /var/lib/rancher/k3s/server/node-token
-        dest: /tmp/k3s_token
-        flat: yes
+    - name: Read the join token without writing it to the controller
+      ansible.builtin.slurp:
+        src: "{{ k3s_data_dir }}/server/node-token"
+      register: k3s_join_token
+      no_log: true
 
 - name: Install K3s on Worker Nodes
   hosts: the_hive[1:]
   become: true
+  vars_files:
+    - storage_vars.yml
   tasks:
     - name: Install K3s agent on worker nodes
-      ansible.builtin.shell: >
-        curl -sfL https://get.k3s.io | K3S_URL="https://{{ hostvars[groups['the_hive'][0]]['ansible_default_ipv4']['address'] }}:6443" K3S_TOKEN="{{ lookup('file', '/tmp/k3s_token') }}" sh -
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL https://get.k3s.io | sh -s - agent --data-dir {{ k3s_data_dir | quote }}
       args:
         creates: /etc/systemd/system/k3s-agent.service
+        executable: /bin/bash
+      environment:
+        K3S_URL: "https://{{ hostvars[groups['the_hive'][0]].ansible_host | default(groups['the_hive'][0]) }}:6443"
+        K3S_TOKEN: "{{ hostvars[groups['the_hive'][0]].k3s_join_token.content | b64decode | trim }}"
+      no_log: true

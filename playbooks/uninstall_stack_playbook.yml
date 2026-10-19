@@ -1,95 +1,32 @@
-- name: Uninstall Full Stack
+---
+- name: Uninstall application stack
   hosts: localhost
   gather_facts: false
 
   tasks:
-    - name: Uninstall the Grafana chart
+    - name: Remove application Helm releases
       kubernetes.core.helm:
-        name: grafana
-        release_namespace: monitoring
+        name: "{{ item.name }}"
+        release_namespace: "{{ item.namespace }}"
         state: absent
+        wait: true
+        timeout: 10m0s
+      loop:
+        - { name: prometheus, namespace: monitoring }
+        - { name: prefect-worker, namespace: prefect }
+        - { name: prefect-server, namespace: prefect }
+        - { name: n8n, namespace: n8n }
 
-    - name: Uninstall the Prometheus Stack chart
-      kubernetes.core.helm:
-        name: prometheus
-        release_namespace: monitoring
-        state: absent
-
-    - name: Uninstall the Prefect Worker chart
-      kubernetes.core.helm:
-        name: prefect-worker
-        release_namespace: prefect
-        state: absent
-
-    - name: Uninstall the Prefect Server chart
-      kubernetes.core.helm:
-        name: prefect-server
-        release_namespace: prefect
-        state: absent
-
-    # Note: n8n is now a direct manifest deployment, but removing the namespace handles it.
-    # We remove the helm uninstall task just in case it was installed that way before.
-    - name: Uninstall the n8n chart
-      kubernetes.core.helm:
-        name: n8n
-        release_namespace: n8n
-        state: absent
-      ignore_errors: true
-
-    - name: Forcefully Uninstall the Longhorn chart via command line
-      ansible.builtin.command:
-        cmd: helm uninstall longhorn -n longhorn-system --no-hooks
-      register: helm_uninstall_result
-      changed_when: "'release \"longhorn\" uninstalled' in helm_uninstall_result.stdout"
-      failed_when:
-        - helm_uninstall_result.rc != 0
-        - "'release: not found' not in helm_uninstall_result.stderr"
-      ignore_errors: true
-
-    - name: Remove the Grafana admin secret
+    - name: Remove application namespaces and their persistent volume claims
       kubernetes.core.k8s:
         state: absent
-        kind: Secret
-        name: grafana-admin-creds
-        namespace: monitoring
-
-    # ------------- Namespace Deletion & Cleanup -------------
-    - name: Delete Namespaces (removes all remaining resources)
-      kubernetes.core.k8s:
-        state: absent
+        api_version: v1
         kind: Namespace
         name: "{{ item }}"
+        wait: true
+        wait_timeout: 300
       loop:
         - prefect
         - monitoring
-        - longhorn-system
         - n8n
-      register: delete_ns_result
-
-    - name: Wait for namespaces to terminate (timeout 60s)
-      ansible.builtin.shell: "kubectl get ns {{ item }} --no-headers 2>/dev/null || echo 'NotFound'"
-      register: ns_check
-      loop:
-        - prefect
-        - monitoring
-        - longhorn-system
-        - n8n
-      until: "'NotFound' in ns_check.stdout"
-      retries: 6
-      delay: 10
-      changed_when: false
-      failed_when: false # Don't fail yet, we will force clean next
-
-    - name: Force delete stuck namespaces (remove finalizers)
-      ansible.builtin.shell: |
-        kubectl get namespace {{ item }} -o json | \
-        jq 'del(.spec.finalizers[] | select(. == "kubernetes"))' | \
-        kubectl replace --raw "/api/v1/namespaces/{{ item }}/finalize" -f -
-      loop:
-        - prefect
-        - monitoring
-        - longhorn-system
-        - n8n
-      when: "'NotFound' not in (ns_check.results | selectattr('item', 'equalto', item) | first).stdout"
-      ignore_errors: true
-      changed_when: true
+        - pihole

@@ -1,0 +1,230 @@
+---
+# Pi-hole uses the official container. K3s ServiceLB publishes DNS on every
+# node's port 53; Traefik already publishes HTTPS on every node's port 443.
+- name: Create persistent storage for Pi-hole
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: pihole-data
+        namespace: pihole
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 1Gi
+
+- name: Deploy Pi-hole DNS and web server
+  kubernetes.core.k8s:
+    state: present
+    wait: true
+    wait_timeout: 900
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: pihole
+        namespace: pihole
+      spec:
+        replicas: 1
+        strategy:
+          type: Recreate
+        selector:
+          matchLabels:
+            app: pihole
+        template:
+          metadata:
+            labels:
+              app: pihole
+          spec:
+            # Keep the DNS server's own lookups outside the cluster DNS chain.
+            dnsPolicy: None
+            dnsConfig:
+              nameservers: "{{ pihole_upstream_dns }}"
+            containers:
+              - name: pihole
+                image: pihole/pihole:2026.10.0
+                imagePullPolicy: IfNotPresent
+                env:
+                  - name: TZ
+                    value: America/Chicago
+                  - name: FTLCONF_webserver_api_password
+                    valueFrom:
+                      secretKeyRef:
+                        name: pihole-admin
+                        key: password
+                  - name: FTLCONF_webserver_domain
+                    value: "pihole.{{ lan_domain }}"
+                  - name: FTLCONF_dns_listeningMode
+                    value: all
+                  - name: FTLCONF_dns_domain_name
+                    value: "{{ lan_domain }}"
+                  - name: FTLCONF_dns_upstreams
+                    value: "{{ pihole_upstream_dns | join(';') }}"
+                  - name: FTLCONF_misc_dnsmasq_lines
+                    value: |-
+                      address=/n8n.{{ lan_domain }}/{{ lan_ip }}
+                      address=/prefect.{{ lan_domain }}/{{ lan_ip }}
+                      address=/grafana.{{ lan_domain }}/{{ lan_ip }}
+                      address=/prometheus.{{ lan_domain }}/{{ lan_ip }}
+                      address=/pihole.{{ lan_domain }}/{{ lan_ip }}
+                ports:
+                  - name: dns-tcp
+                    containerPort: 53
+                    protocol: TCP
+                  - name: dns-udp
+                    containerPort: 53
+                    protocol: UDP
+                  - name: http
+                    containerPort: 80
+                    protocol: TCP
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 256Mi
+                  limits:
+                    cpu: "1"
+                    memory: 1Gi
+                startupProbe:
+                  httpGet:
+                    path: /api/info/login
+                    port: http
+                  periodSeconds: 10
+                  failureThreshold: 30
+                readinessProbe:
+                  httpGet:
+                    path: /api/info/login
+                    port: http
+                  periodSeconds: 10
+                  failureThreshold: 6
+                livenessProbe:
+                  httpGet:
+                    path: /api/info/login
+                    port: http
+                  periodSeconds: 20
+                  failureThreshold: 6
+                volumeMounts:
+                  - name: data
+                    mountPath: /etc/pihole
+            volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: pihole-data
+
+- name: Expose Pi-hole DNS on the nodes' LAN port 53
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: pihole-dns
+        namespace: pihole
+      spec:
+        type: LoadBalancer
+        externalTrafficPolicy: Cluster
+        selector:
+          app: pihole
+        ports:
+          - name: dns-tcp
+            port: 53
+            targetPort: dns-tcp
+            protocol: TCP
+          - name: dns-udp
+            port: 53
+            targetPort: dns-udp
+            protocol: UDP
+
+- name: Expose Pi-hole web server inside the cluster
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: pihole-web
+        namespace: pihole
+      spec:
+        type: ClusterIP
+        selector:
+          app: pihole
+        ports:
+          - name: http
+            port: 80
+            targetPort: http
+            protocol: TCP
+
+- name: Wait for Pi-hole DNS to be published on the reserved LAN address
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    name: pihole-dns
+    namespace: pihole
+  register: pihole_dns_service
+  until: lan_ip in ((pihole_dns_service.resources | first | default({})).get('status', {}).get('loadBalancer', {}).get('ingress', []) | selectattr('ip', 'defined') | map(attribute='ip') | list)
+  retries: 30
+  delay: 10
+
+- name: Wait for Traefik HTTPS to be published on the reserved LAN address
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    name: traefik
+    namespace: kube-system
+  register: traefik_service
+  until: lan_ip in ((traefik_service.resources | first | default({})).get('status', {}).get('loadBalancer', {}).get('ingress', []) | selectattr('ip', 'defined') | map(attribute='ip') | list)
+  retries: 30
+  delay: 10
+
+- name: Create LAN basic-auth middlewares
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: lan-auth
+        namespace: "{{ item }}"
+      spec:
+        basicAuth:
+          secret: lan-basic-auth
+  loop:
+    - prefect
+    - monitoring
+
+- name: Create LAN ingress routes for the web interfaces
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: "lan-{{ item.host }}"
+        namespace: "{{ item.namespace }}"
+        annotations: "{{ {'traefik.ingress.kubernetes.io/router.entrypoints': 'websecure'} | combine({'traefik.ingress.kubernetes.io/router.middlewares': item.namespace ~ '-lan-auth@kubernetescrd'} if item.auth else {}) }}"
+      spec:
+        ingressClassName: traefik
+        tls:
+          - hosts:
+              - "{{ item.host }}.{{ lan_domain }}"
+        rules:
+          - host: "{{ item.host }}.{{ lan_domain }}"
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: "{{ item.service }}"
+                      port:
+                        number: "{{ item.port }}"
+  loop:
+    - { host: n8n, namespace: n8n, service: n8n-main, port: 5678, auth: false }
+    - { host: prefect, namespace: prefect, service: prefect-server, port: 4200, auth: true }
+    - { host: grafana, namespace: monitoring, service: prometheus-grafana, port: 80, auth: false }
+    - { host: prometheus, namespace: monitoring, service: prometheus-kube-prometheus-prometheus, port: 9090, auth: true }
+    - { host: pihole, namespace: pihole, service: pihole-web, port: 80, auth: false }

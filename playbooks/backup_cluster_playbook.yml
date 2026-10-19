@@ -1,0 +1,245 @@
+---
+# Run during a maintenance window. Pods and LAN DNS stop while the archives
+# are copied to an off-cluster destination on the Ansible controller.
+- name: Back up local volumes and the K3s datastore
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - storage_vars.yml
+  vars:
+    backup_root: "{{ lookup('ansible.builtin.env', 'HIVE_BACKUP_DIR') }}"
+  tasks:
+    - name: Require an absolute off-cluster backup destination
+      ansible.builtin.assert:
+        that:
+          - backup_root is match('^/')
+          - groups['the_hive'] | length > 0
+        fail_msg: Set HIVE_BACKUP_DIR to an absolute directory on the Ansible controller, outside the Pi cluster.
+
+    - name: Check that the backup destination already exists
+      ansible.builtin.stat:
+        path: "{{ backup_root }}"
+      register: backup_root_stat
+
+    - name: Require the backup destination to be mounted and writable
+      ansible.builtin.assert:
+        that:
+          - backup_root_stat.stat.isdir | default(false)
+          - backup_root_stat.stat.writeable | default(false)
+        fail_msg: Create a writable HIVE_BACKUP_DIR on the controller before running a backup.
+
+    - name: Set the backup run directory
+      ansible.builtin.set_fact:
+        backup_run_dir: "{{ backup_root }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+
+    - name: Create a private backup directory
+      ansible.builtin.file:
+        path: "{{ backup_run_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Save the cluster inventory and storage configuration with the backup
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ backup_run_dir }}/{{ item.name }}"
+        mode: '0600'
+      loop:
+        - { src: "{{ playbook_dir }}/../hosts", name: hosts }
+        - { src: "{{ playbook_dir }}/storage_vars.yml", name: storage_vars.yml }
+        - { src: "{{ playbook_dir }}/network_vars.yml", name: network_vars.yml }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the volume filesystem on every Pi
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - --noheadings
+          - --output
+          - TARGET
+          - --target
+          - "{{ local_storage_path }}"
+      become: true
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['the_hive'] }}"
+      register: backup_mounts
+      changed_when: false
+
+    - name: Require every volume directory to be on the configured drive
+      ansible.builtin.assert:
+        that:
+          - item.stdout | trim == disks_to_mount[0].path
+        fail_msg: "The storage drive is not mounted on {{ item.item }}; backup stopped before interrupting the cluster."
+      loop: "{{ backup_mounts.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Check the optional K3s runtime drive on every Pi
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --output, TARGET, --target, "{{ k3s_data_dir }}"]
+      become: true
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['the_hive'] }}"
+      register: backup_runtime_mounts
+      changed_when: false
+      when: k3s_data_mount | length > 0
+
+    - name: Require every optional K3s runtime drive to be mounted
+      ansible.builtin.assert:
+        that:
+          - item.stdout | trim == k3s_data_mount
+        fail_msg: "The K3s runtime drive is not mounted on {{ item.item }}; backup stopped before interrupting the cluster."
+      loop: "{{ backup_runtime_mounts.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: k3s_data_mount | length > 0
+
+    - name: Stop writers, copy their data, and bring the cluster back
+      block:
+        - name: Stop K3s agents
+          ansible.builtin.systemd_service:
+            name: k3s-agent
+            state: stopped
+          become: true
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['the_hive'][1:] }}"
+
+        - name: Stop the K3s server
+          ansible.builtin.systemd_service:
+            name: k3s
+            state: stopped
+          become: true
+          delegate_to: "{{ groups['the_hive'][0] }}"
+
+        - name: Stop the remaining pod containers
+          ansible.builtin.command: /usr/local/bin/k3s-killall.sh
+          environment:
+            K3S_DATA_DIR: "{{ k3s_data_dir }}"
+          become: true
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['the_hive'] }}"
+
+        - name: Archive each node's local volumes on its storage drive
+          community.general.archive:
+            path: "{{ local_storage_path }}"
+            dest: "{{ disks_to_mount[0].path }}/hive-{{ backup_run_dir | basename }}-{{ item }}-volumes.tar.gz"
+            format: gz
+            mode: '0600'
+          become: true
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['the_hive'] }}"
+          register: volume_archives
+
+        - name: Require complete local volume archives
+          ansible.builtin.assert:
+            that:
+              - item.dest_state == 'archive'
+              - item.missing | length == 0
+            fail_msg: "The local volume archive for {{ item.item }} is incomplete."
+          loop: "{{ volume_archives.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Archive the K3s datastore and token on the server
+          community.general.archive:
+            path:
+              - "{{ k3s_data_dir }}/server/db"
+              - "{{ k3s_data_dir }}/server/token"
+              - "{{ k3s_data_dir }}/server/node-token"
+            dest: "{{ disks_to_mount[0].path }}/hive-{{ backup_run_dir | basename }}-k3s-server.tar.gz"
+            format: gz
+            mode: '0600'
+          become: true
+          delegate_to: "{{ groups['the_hive'][0] }}"
+          register: k3s_archive
+
+        - name: Require a complete K3s datastore archive
+          ansible.builtin.assert:
+            that:
+              - k3s_archive.dest_state == 'archive'
+              - k3s_archive.missing | length == 0
+            fail_msg: The K3s datastore or token archive is incomplete.
+
+        - name: Make each archive readable by the Ansible SSH user
+          ansible.builtin.file:
+            path: "{{ disks_to_mount[0].path }}/hive-{{ backup_run_dir | basename }}-{{ item }}-volumes.tar.gz"
+            owner: "{{ hostvars[item].ansible_user | default(ansible_user) }}"
+            mode: '0600'
+          become: true
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['the_hive'] }}"
+
+        - name: Make the K3s archive readable by the Ansible SSH user
+          ansible.builtin.file:
+            path: "{{ disks_to_mount[0].path }}/hive-{{ backup_run_dir | basename }}-k3s-server.tar.gz"
+            owner: "{{ hostvars[groups['the_hive'][0]].ansible_user | default(ansible_user) }}"
+            mode: '0600'
+          become: true
+          delegate_to: "{{ groups['the_hive'][0] }}"
+
+        - name: Copy each node's volume archive off the cluster
+          ansible.builtin.fetch:
+            src: "{{ disks_to_mount[0].path }}/hive-{{ backup_run_dir | basename }}-{{ item }}-volumes.tar.gz"
+            dest: "{{ backup_run_dir }}/{{ item }}-volumes.tar.gz"
+            flat: true
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['the_hive'] }}"
+
+        - name: Copy the K3s datastore archive off the cluster
+          ansible.builtin.fetch:
+            src: "{{ disks_to_mount[0].path }}/hive-{{ backup_run_dir | basename }}-k3s-server.tar.gz"
+            dest: "{{ backup_run_dir }}/k3s-server.tar.gz"
+            flat: true
+          delegate_to: "{{ groups['the_hive'][0] }}"
+
+        - name: Restrict controller backup archive permissions
+          ansible.builtin.file:
+            path: "{{ backup_run_dir }}/{{ item }}"
+            mode: '0600'
+          loop: "{{ (groups['the_hive'] | map('regex_replace', '$', '-volumes.tar.gz') | list) + ['k3s-server.tar.gz'] }}"
+
+      always:
+        - name: Restart the K3s server
+          ansible.builtin.systemd_service:
+            name: k3s
+            state: started
+          become: true
+          delegate_to: "{{ groups['the_hive'][0] }}"
+
+        - name: Restart K3s agents
+          ansible.builtin.systemd_service:
+            name: k3s-agent
+            state: started
+          become: true
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['the_hive'][1:] }}"
+
+        - name: Remove temporary volume archives from the Pi storage drives
+          ansible.builtin.file:
+            path: "{{ disks_to_mount[0].path }}/hive-{{ backup_run_dir | basename }}-{{ item }}-volumes.tar.gz"
+            state: absent
+          become: true
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['the_hive'] }}"
+
+        - name: Remove the temporary K3s datastore archive from the Pi
+          ansible.builtin.file:
+            path: "{{ disks_to_mount[0].path }}/hive-{{ backup_run_dir | basename }}-k3s-server.tar.gz"
+            state: absent
+          become: true
+          delegate_to: "{{ groups['the_hive'][0] }}"
+
+    - name: Verify the copied archives can be read
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -tzf
+          - "{{ backup_run_dir }}/{{ item }}"
+      loop: "{{ (groups['the_hive'] | map('regex_replace', '$', '-volumes.tar.gz') | list) + ['k3s-server.tar.gz'] }}"
+      changed_when: false
+
+    - name: Mark the off-cluster backup complete
+      ansible.builtin.copy:
+        dest: "{{ backup_run_dir }}/COMPLETE"
+        content: "K3s datastore, token, and local volumes from {{ groups['the_hive'] | join(', ') }}\n"
+        mode: '0600'

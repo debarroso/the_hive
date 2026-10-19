@@ -2,15 +2,33 @@
 - name: Uninstall K3s from Master Node
   hosts: the_hive[0] # Targets bee1
   become: yes
+  vars_files:
+    - storage_vars.yml
   tasks:
+    - name: Check for the K3s server uninstall script
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: k3s_server_uninstall
+
     - name: Run K3s uninstall script
       ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
-      ignore_errors: true # Ignore errors if the file doesn't exist
+      environment:
+        K3S_DATA_DIR: "{{ k3s_data_dir }}"
+      when: k3s_server_uninstall.stat.exists
 
 - name: Uninstall K3s from Worker Nodes
   hosts: the_hive[1:] # Targets bee2, bee3, etc.
   become: yes
+  vars_files:
+    - storage_vars.yml
   tasks:
+    - name: Check for the K3s agent uninstall script
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s-agent-uninstall.sh
+      register: k3s_agent_uninstall
+
     - name: Run K3s agent uninstall script
       ansible.builtin.command: /usr/local/bin/k3s-agent-uninstall.sh
-      ignore_errors: true # Ignore errors if the file doesn't exist
+      environment:
+        K3S_DATA_DIR: "{{ k3s_data_dir }}"
+      when: k3s_agent_uninstall.stat.exists

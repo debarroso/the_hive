@@ -1,78 +1,130 @@
-# playbook-k8s-safe-rolling-upgrade.yml
 ---
-- name: Perform a SAFE rolling update on Kubernetes nodes
+- name: Upgrade K3s nodes one at a time
   hosts: the_hive
   become: true
-  serial: 1          # Forces a one-by-one update.
+  serial: 1
+  order: reverse_inventory  # Upgrade the workers before the single control-plane node.
+  vars_files:
+    - storage_vars.yml
 
   tasks:
-    - name: Cordon the node to prevent new pods from being scheduled
-      become: false
-      ansible.builtin.command: "kubectl cordon {{ inventory_hostname }}"
-      delegate_to: localhost # Assumes kubectl is configured on the machine running Ansible
+    - name: Cordon and drain the node
+      block:
+        - name: Cordon the node
+          become: false
+          ansible.builtin.command:
+            argv: [kubectl, cordon, "{{ inventory_hostname }}"]
+          delegate_to: localhost
 
-    - name: Drain the node of all running pods
-      become: false
-      ansible.builtin.command: >
-        kubectl drain {{ inventory_hostname }}
-        --ignore-daemonsets
-        --delete-emptydir-data
-        --force
-        --timeout=300s
-        --skip-wait-for-delete-timeout=60
-        --disable-eviction
-      delegate_to: localhost
+        - name: Drain the node while respecting PodDisruptionBudgets
+          become: false
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - drain
+              - "{{ inventory_hostname }}"
+              - --ignore-daemonsets
+              - --delete-emptydir-data
+              - --timeout=300s
+          delegate_to: localhost
+
+      rescue:
+        - name: Uncordon the node if draining failed before the upgrade
+          become: false
+          ansible.builtin.command:
+            argv: [kubectl, uncordon, "{{ inventory_hostname }}"]
+          delegate_to: localhost
+
+        - name: Stop the upgrade after a failed drain
+          ansible.builtin.fail:
+            msg: "Could not drain {{ inventory_hostname }}; it was uncordoned and no packages were changed."
 
     - name: Update apt cache and upgrade packages
       ansible.builtin.apt:
-        update_cache: yes
+        update_cache: true
         upgrade: dist
 
     - name: Reboot the node
       ansible.builtin.reboot:
         msg: "Rebooting node {{ inventory_hostname }} after updates"
 
-    - name: Wait for the node to report as 'Ready' in Kubernetes
-      become: false
-      ansible.builtin.shell: "kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'"
-      delegate_to: localhost
-      register: node_status
-      until: node_status.stdout == 'True'
-      retries: 30  # Try 30 times
-      delay: 10    # Wait 10 seconds between each try (5 minutes total)
-      changed_when: false # This command doesn't change state, so we report no change
-
-    - name: Check if Prefect Server deployment exists
-      become: false
-      ansible.builtin.command: "kubectl get deployment prefect-server -n prefect"
-      delegate_to: localhost
-      register: prefect_server_check
-      failed_when: false
+    - name: Check that the local volume directory is still on its external drive
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - --noheadings
+          - --output
+          - TARGET
+          - --target
+          - "{{ local_storage_path }}"
+      register: local_storage_mount
       changed_when: false
 
-    - name: Wait for Prefect Server to be fully stable
-      become: false
-      ansible.builtin.command: "kubectl rollout status deployment/prefect-server -n prefect --timeout=300s"
-      delegate_to: localhost
-      changed_when: false
-      when: prefect_server_check.rc == 0
+    - name: Require the volume drive to be mounted before accepting the node
+      ansible.builtin.assert:
+        that:
+          - local_storage_mount.stdout | trim == disks_to_mount[0].path
+        fail_msg: "{{ local_storage_path }} is not on {{ disks_to_mount[0].path }}. The node remains cordoned."
 
-    - name: Check if Prefect Worker deployment exists
+    - name: Check the optional K3s runtime drive after reboot
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --output, TARGET, --target, "{{ k3s_data_dir }}"]
+      register: runtime_mount
+      changed_when: false
+      when: k3s_data_mount | length > 0
+
+    - name: Require the optional K3s runtime drive before accepting the node
+      ansible.builtin.assert:
+        that:
+          - runtime_mount.stdout | trim == k3s_data_mount
+        fail_msg: "{{ k3s_data_dir }} is not on {{ k3s_data_mount }}. The node remains cordoned."
+      when: k3s_data_mount | length > 0
+
+    - name: Wait for the node to report Ready
       become: false
-      ansible.builtin.command: "kubectl get deployment prefect-worker -n prefect"
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - "node/{{ inventory_hostname }}"
+          - --timeout=30s
       delegate_to: localhost
-      register: prefect_worker_check
-      failed_when: false
+      register: node_ready
+      until: node_ready.rc == 0
+      retries: 20
+      delay: 10
       changed_when: false
 
-    - name: Wait for Prefect Worker to be fully stable
+    # A local-path volume is tied to this node. Its pod cannot become Ready
+    # until scheduling is enabled again, so uncordon before waiting for apps.
+    - name: Uncordon the recovered node
       become: false
-      ansible.builtin.command: "kubectl rollout status deployment/prefect-worker -n prefect --timeout=300s"
+      ansible.builtin.command:
+        argv: [kubectl, uncordon, "{{ inventory_hostname }}"]
       delegate_to: localhost
-      changed_when: false
-      when: prefect_worker_check.rc == 0
 
-    - name: Uncordon the node to bring it back into service
+    - name: List all deployments and stateful sets
       become: false
-      ansible.builtin.command: "kubectl uncordon {{ inventory_hostname }}"
+      ansible.builtin.command:
+        argv: [kubectl, get, deployments,statefulsets, --all-namespaces, -o, json]
       delegate_to: localhost
+      register: workload_json
+      changed_when: false
+
+    - name: Wait for workloads to recover before upgrading the next node
+      become: false
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - "{{ item.kind | lower }}/{{ item.metadata.name }}"
+          - -n
+          - "{{ item.metadata.namespace }}"
+          - --timeout=300s
+      delegate_to: localhost
+      loop: "{{ (workload_json.stdout | from_json).items }}"
+      loop_control:
+        label: "{{ item.metadata.namespace }}/{{ item.kind | lower }}/{{ item.metadata.name }}"
+      changed_when: false
